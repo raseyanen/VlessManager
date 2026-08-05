@@ -12,7 +12,8 @@ define Package/luci-app-vlessmanager
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=VlessManager - VLESS Proxy Manager
-  DEPENDS:=+curl +sing-box +luci-base
+  DEPENDS:=+curl +luci-base
+  EXTRA_DEPENDS:=sing-box
   PKGARCH:=all
 endef
 
