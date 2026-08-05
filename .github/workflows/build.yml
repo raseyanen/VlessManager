@@ -15,16 +15,17 @@ jobs:
   build:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: openwrt-24.10.0
             sdk_page: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/
-            cache_key: sdk-24.10.0-v7
+            cache_key: sdk-24.10.0-v8
           - name: openwrt-snapshot
             sdk_page: https://downloads.openwrt.org/snapshots/targets/x86/64/
-            cache_key: sdk-snapshot-v7
+            cache_key: sdk-snapshot-v8
 
     steps:
       - name: Checkout
@@ -33,8 +34,6 @@ jobs:
       - name: Validate repository layout
         run: |
           set -eux
-          pwd
-          ls -la
           test -d luci-app-vlessmanager
           test -f luci-app-vlessmanager/Makefile
           test -f luci-app-vlessmanager/root/etc/config/vlessmanager
@@ -42,8 +41,6 @@ jobs:
           test -f luci-app-vlessmanager/root/usr/bin/vlessmanager
           test -f luci-app-vlessmanager/root/usr/bin/vlessmanager-urltest
           test -f luci-app-vlessmanager/htdocs/luci-static/resources/view/vlessmanager/settings.js
-          echo "=== Package tree ==="
-          find luci-app-vlessmanager -maxdepth 4 -type f | sort
 
       - name: Install dependencies
         run: |
@@ -69,7 +66,6 @@ jobs:
           HTML="$(curl -fsSL "$SDK_PAGE")"
           SDK_FILE="$(printf '%s' "$HTML" | grep -Eo 'openwrt-sdk-[^"]+\.(tar\.zst|tar\.xz|tar\.gz)' | head -n1)"
           test -n "$SDK_FILE"
-          echo "Found SDK: $SDK_FILE"
           wget -q "${SDK_PAGE}${SDK_FILE}" -O sdk-archive
 
           mkdir -p sdk
@@ -88,24 +84,8 @@ jobs:
           rm -rf sdk/package/${PKG_NAME}
           mkdir -p sdk/package/${PKG_NAME}
           cp -a luci-app-vlessmanager/. sdk/package/${PKG_NAME}/
-
-          echo "=== Copied package tree ==="
-          find sdk/package/${PKG_NAME} -maxdepth 4 -type f | sort
-
           test -f sdk/package/${PKG_NAME}/Makefile
 
-      - name: Update feeds
-        run: |
-          set -eux
-          cd sdk
-          ./scripts/feeds update packages
-
-      - name: Install dependency metadata
-        run: |
-          set -eux
-          cd sdk
-          ./scripts/feeds install -p packages curl || true
-          
       - name: Configure build
         run: |
           set -eux
@@ -115,7 +95,6 @@ jobs:
           echo "CONFIG_ALL_NONSHARED=y" >> .config
           echo "CONFIG_PACKAGE_${PKG_NAME}=m" >> .config
           make defconfig
-          grep "CONFIG_PACKAGE_${PKG_NAME}" .config || true
           test -f package/${PKG_NAME}/Makefile
 
       - name: Build package
