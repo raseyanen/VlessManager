@@ -1,0 +1,34 @@
+// root/usr/share/rpcd/acl.d/luci-app-vlessmanager.json
+{
+    "luci-app-vlessmanager": {
+        "description": "Grant access to VlessManager",
+        "read": {
+            "ubus": {
+                "service": ["list"],
+                "uci": ["vlessmanager"]
+            },
+            "file": {
+                "/usr/bin/vlessmanager status": ["exec"],
+                "/usr/bin/vlessmanager servers": ["exec"],
+                "/usr/bin/vlessmanager log *": ["exec"],
+                "/usr/bin/vlessmanager check": ["exec"],
+                "/usr/bin/vlessmanager version": ["exec"],
+                "/var/run/vlessmanager/*": ["read"]
+            },
+            "uci": ["vlessmanager"]
+        },
+        "write": {
+            "ubus": {
+                "uci": ["vlessmanager"]
+            },
+            "file": {
+                "/usr/bin/vlessmanager start": ["exec"],
+                "/usr/bin/vlessmanager stop": ["exec"],
+                "/usr/bin/vlessmanager restart": ["exec"],
+                "/usr/bin/vlessmanager update": ["exec"],
+                "/etc/init.d/vlessmanager *": ["exec"]
+            },
+            "uci": ["vlessmanager"]
+        }
+    }
+}
