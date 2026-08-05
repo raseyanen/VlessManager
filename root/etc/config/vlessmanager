@@ -1,0 +1,50 @@
+# root/etc/config/vlessmanager
+
+config vlessmanager 'main'
+    option enabled '0'
+    # URL на raw txt файл с VLESS конфигами (построчно)
+    option subscribe_url ''
+    # Интервал обновления подписки в минутах
+    option update_interval '60'
+    # Regex для включения конфигов по имени (пусто = все)
+    option include_regex ''
+    # Regex для исключения конфигов по имени (пусто = ничего)
+    option exclude_regex ''
+    # URL для urltest (проверка доступности серверов)
+    option urltest_url 'https://www.gstatic.com/generate_204'
+    # Интервал urltest в секундах
+    option urltest_interval '300'
+    # Допустимая задержка в мс для urltest
+    option urltest_tolerance '50'
+    # Таймаут urltest в мс
+    option urltest_timeout '5000'
+    # Имя VPN интерфейса
+    option interface_name 'vlessmanager'
+    # TUN адрес
+    option tun_address '172.19.0.1/30'
+    # TUN IPv6 адрес
+    option tun_address6 'fdfe:dcba:9876::1/126'
+    # MTU
+    option tun_mtu '9000'
+    # DNS для перехвата
+    option dns_server '1.1.1.1'
+    # Принудительное обновление при отсутствии рабочих серверов
+    option auto_refresh_on_fail '1'
+    # Максимальное число попыток обновления подряд
+    option max_refresh_attempts '3'
+    # Лог файл
+    option log_file '/var/log/vlessmanager.log'
+    # Уровень лога sing-box: trace,debug,info,warn,error,fatal,panic
+    option log_level 'warn'
+    # Sing-box конфиг
+    option singbox_config '/var/run/vlessmanager/singbox.json'
+    # Файл с кэшем подписки
+    option cache_file '/var/run/vlessmanager/subscribe_cache.txt'
+    # Режим стека TUN: system, gvisor, mixed
+    option tun_stack 'mixed'
+    # Авто-рестарт sing-box при ошибке
+    option auto_restart '1'
+    # Поддерживаемые протоколы (vless)
+    option supported_protocols 'vless'
+    # Фильтр по типу транспорта: tcp,ws,xhttp,grpc,all
+    option transport_filter 'all'
