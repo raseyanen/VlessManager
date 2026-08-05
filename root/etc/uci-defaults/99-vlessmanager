@@ -1,0 +1,38 @@
+#!/bin/sh
+# root/etc/uci-defaults/99-vlessmanager
+
+# Убедимся что конфиг существует
+if [ ! -f /etc/config/vlessmanager ]; then
+    touch /etc/config/vlessmanager
+    uci set vlessmanager.main=vlessmanager
+    uci set vlessmanager.main.enabled=0
+    uci set vlessmanager.main.subscribe_url=''
+    uci set vlessmanager.main.update_interval=60
+    uci set vlessmanager.main.include_regex=''
+    uci set vlessmanager.main.exclude_regex=''
+    uci set vlessmanager.main.urltest_url='https://www.gstatic.com/generate_204'
+    uci set vlessmanager.main.urltest_interval=300
+    uci set vlessmanager.main.urltest_tolerance=50
+    uci set vlessmanager.main.urltest_timeout=5000
+    uci set vlessmanager.main.interface_name='vlessmanager'
+    uci set vlessmanager.main.tun_address='172.19.0.1/30'
+    uci set vlessmanager.main.tun_address6='fdfe:dcba:9876::1/126'
+    uci set vlessmanager.main.tun_mtu=9000
+    uci set vlessmanager.main.dns_server='1.1.1.1'
+    uci set vlessmanager.main.auto_refresh_on_fail=1
+    uci set vlessmanager.main.max_refresh_attempts=3
+    uci set vlessmanager.main.log_file='/var/log/vlessmanager.log'
+    uci set vlessmanager.main.log_level='warn'
+    uci set vlessmanager.main.singbox_config='/var/run/vlessmanager/singbox.json'
+    uci set vlessmanager.main.cache_file='/var/run/vlessmanager/subscribe_cache.txt'
+    uci set vlessmanager.main.tun_stack='mixed'
+    uci set vlessmanager.main.auto_restart=1
+    uci set vlessmanager.main.transport_filter='all'
+    uci commit vlessmanager
+fi
+
+# Разрешаем выполнение
+chmod +x /usr/bin/vlessmanager
+chmod +x /etc/init.d/vlessmanager
+
+exit 0
