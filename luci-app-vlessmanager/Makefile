@@ -12,13 +12,13 @@ define Package/luci-app-vlessmanager
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=VlessManager - VLESS Proxy Manager
-  DEPENDS:=+curl
   PKGARCH:=all
 endef
 
 define Package/luci-app-vlessmanager/description
   VLESS proxy manager with LuCI UI, subscription updates,
   urltest failover and TUN interface.
+  Runtime requirements: curl, sing-box, LuCI.
 endef
 
 define Package/luci-app-vlessmanager/conffiles
@@ -53,12 +53,20 @@ endef
 define Package/luci-app-vlessmanager/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
+	echo "VlessManager installed."
+
+	if ! command -v curl >/dev/null 2>&1; then
+		echo "WARNING: curl not found. Install it manually: apk add curl"
+	fi
+
 	if ! command -v sing-box >/dev/null 2>&1; then
 		echo "WARNING: sing-box not found. Install it manually: apk add sing-box"
 	fi
-	if [ ! -d /www/luci-static/resources ]; then
+
+	if [ ! -d /www/luci-static/resources ] && [ ! -d /www/luci-static ]; then
 		echo "WARNING: LuCI not found. Install LuCI first."
 	fi
+
 	exit 0
 }
 endef
