@@ -1,8 +1,8 @@
 #!/bin/sh
-# root/usr/bin/vlessmanager
+# luci-app-vlessmanager/root/usr/bin/vlessmanager
 # VlessManager — основной скрипт управления
 
-set -o pipefail
+set -o pipefail 2>/dev/null || true
 
 VERSION="1.0.0"
 PROG_NAME="vlessmanager"
@@ -14,15 +14,10 @@ STATUS_FILE="${RUN_DIR}/status.json"
 # ===================== УТИЛИТЫ =====================
 
 log() {
-    local level="$1"
-    shift
-    local msg="$*"
+    local level="$1"; shift
     local log_file
     log_file=$(uci -q get vlessmanager.main.log_file 2>/dev/null || echo "/var/log/vlessmanager.log")
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [${level}] ${msg}" >> "$log_file"
-    [ "$level" = "ERROR" ] && echo "[${timestamp}] [${level}] ${msg}" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] $*" >> "$log_file"
 }
 
 log_info()  { log "INFO"  "$@"; }
@@ -36,29 +31,17 @@ acquire_lock() {
         local lock_pid
         lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
         if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-            rm -f "$LOCK_FILE"
-            break
+            rm -f "$LOCK_FILE"; break
         fi
         attempts=$((attempts + 1))
-        if [ "$attempts" -ge 30 ]; then
-            log_error "Cannot acquire lock after 30 seconds"
-            return 1
-        fi
+        [ "$attempts" -ge 30 ] && { log_error "Cannot acquire lock"; return 1; }
         sleep 1
     done
     echo $$ > "$LOCK_FILE"
-    return 0
 }
 
-release_lock() {
-    rm -f "$LOCK_FILE"
-}
-
-cleanup() {
-    release_lock
-}
-
-trap cleanup EXIT
+release_lock() { rm -f "$LOCK_FILE"; }
+trap 'release_lock' EXIT
 
 ensure_dirs() {
     mkdir -p "$RUN_DIR"
@@ -66,81 +49,54 @@ ensure_dirs() {
 }
 
 get_config() {
-    local key="$1"
-    local default="$2"
     local val
-    val=$(uci -q get "vlessmanager.main.${key}" 2>/dev/null)
-    if [ -z "$val" ]; then
-        echo "$default"
-    else
-        echo "$val"
-    fi
+    val=$(uci -q get "vlessmanager.main.${1}" 2>/dev/null)
+    [ -z "$val" ] && echo "$2" || echo "$val"
 }
 
 update_status() {
-    local status="$1"
-    local message="$2"
-    local active_server="$3"
-    local server_count="$4"
-    local last_update="$5"
-
-    cat > "$STATUS_FILE" <<-STATUSEOF
+    cat > "$STATUS_FILE" <<-EOF
 {
-    "status": "${status}",
-    "message": "${message}",
-    "active_server": "${active_server}",
-    "server_count": ${server_count:-0},
-    "last_update": "${last_update}",
+    "status": "${1}",
+    "message": "${2}",
+    "active_server": "${3}",
+    "server_count": ${4:-0},
+    "last_update": "${5}",
     "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')",
     "version": "${VERSION}"
 }
-STATUSEOF
+EOF
 }
 
 # ===================== ПАРСЕР VLESS =====================
 
-# URL-decode функция
 urldecode() {
-    local data="$1"
-    # Заменяем + на пробелы, затем декодируем %XX
-    printf '%b' "$(echo "$data" | sed 's/+/ /g; s/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
+    printf '%b' "$(echo "$1" | sed 's/+/ /g; s/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
 }
 
-# Парсинг одной VLESS ссылки
-# Формат: vless://UUID@HOST:PORT?params#NAME
 parse_vless_link() {
-    local link="$1"
-    local idx="$2"
-
-    # Убираем vless://
+    local link="$1" idx="$2"
     local stripped="${link#vless://}"
 
-    # Отделяем фрагмент (#NAME)
+    # Фрагмент #NAME
     local name=""
-    case "$stripped" in
-        *"#"*)
-            name=$(echo "$stripped" | sed 's/.*#//')
-            name=$(urldecode "$name")
-            stripped=$(echo "$stripped" | sed 's/#.*//')
-            ;;
-    esac
+    case "$stripped" in *"#"*)
+        name=$(urldecode "$(echo "$stripped" | sed 's/.*#//')")
+        stripped=$(echo "$stripped" | sed 's/#.*//')
+    ;; esac
 
-    # Отделяем параметры (?params)
+    # Параметры ?params
     local params=""
-    case "$stripped" in
-        *"?"*)
-            params=$(echo "$stripped" | sed 's/.*?//')
-            stripped=$(echo "$stripped" | sed 's/?.*//')
-            ;;
-    esac
+    case "$stripped" in *"?"*)
+        params=$(echo "$stripped" | sed 's/.*?//')
+        stripped=$(echo "$stripped" | sed 's/?.*//')
+    ;; esac
 
-    # UUID@HOST:PORT
     local uuid host port
     uuid=$(echo "$stripped" | sed 's/@.*//')
     local hostport
     hostport=$(echo "$stripped" | sed 's/.*@//')
 
-    # Обработка IPv6
     case "$hostport" in
         "["*"]"*)
             host=$(echo "$hostport" | sed 's/\[\(.*\)\].*/\1/')
@@ -151,24 +107,15 @@ parse_vless_link() {
             port=$(echo "$hostport" | cut -d: -f2)
             ;;
     esac
-
     [ -z "$port" ] && port="443"
     [ -z "$name" ] && name="vless-${idx}"
 
-    # Парсинг параметров
     local security="" type="" sni="" fp="" pbk="" sid="" flow=""
-    local ws_path="" ws_host=""
-    local xhttp_path="" xhttp_host="" xhttp_mode=""
-    local grpc_servicename=""
-    local alpn="" allowInsecure=""
+    local path="" ws_host="" xhttp_mode="" grpc_sn="" alpn="" insecure=""
 
-    # Разбираем параметры
-    local IFS_OLD="$IFS"
-    IFS='&'
+    local OLD_IFS="$IFS"; IFS='&'
     for param in $params; do
-        local key val
-        key=$(echo "$param" | cut -d= -f1)
-        val=$(echo "$param" | cut -d= -f2-)
+        local key="${param%%=*}" val="${param#*=}"
         val=$(urldecode "$val")
         case "$key" in
             security)       security="$val" ;;
@@ -178,359 +125,231 @@ parse_vless_link() {
             pbk)            pbk="$val" ;;
             sid)            sid="$val" ;;
             flow)           flow="$val" ;;
-            path)           ws_path="$val"; xhttp_path="$val" ;;
-            host)           ws_host="$val"; xhttp_host="$val" ;;
+            path)           path="$val" ;;
+            host)           ws_host="$val" ;;
             mode)           xhttp_mode="$val" ;;
-            serviceName)    grpc_servicename="$val" ;;
+            serviceName)    grpc_sn="$val" ;;
             alpn)           alpn="$val" ;;
-            allowInsecure)  allowInsecure="$val" ;;
+            allowInsecure)  insecure="$val" ;;
         esac
     done
-    IFS="$IFS_OLD"
+    IFS="$OLD_IFS"
 
     [ -z "$type" ] && type="tcp"
     [ -z "$security" ] && security="none"
     [ -z "$fp" ] && fp="chrome"
 
-    # Генерируем JSON
-    # Формируем tag
     local tag="proxy-${idx}"
-
-    # Начинаем outbound
-    local json=""
-    json="{\"type\":\"vless\",\"tag\":\"${tag}\",\"server\":\"${host}\",\"server_port\":${port},\"uuid\":\"${uuid}\""
+    local json="{\"type\":\"vless\",\"tag\":\"${tag}\",\"server\":\"${host}\",\"server_port\":${port},\"uuid\":\"${uuid}\""
 
     # Flow
-    if [ -n "$flow" ] && [ "$flow" != "none" ]; then
-        json="${json},\"flow\":\"${flow}\""
-    fi
+    [ -n "$flow" ] && [ "$flow" != "none" ] && json="${json},\"flow\":\"${flow}\""
 
     # TLS
     if [ "$security" = "tls" ] || [ "$security" = "reality" ]; then
-        local tls_json=",\"tls\":{\"enabled\":true"
-        if [ -n "$sni" ]; then
-            tls_json="${tls_json},\"server_name\":\"${sni}\""
-        fi
+        local tls=",\"tls\":{\"enabled\":true"
+        [ -n "$sni" ] && tls="${tls},\"server_name\":\"${sni}\""
+
         if [ -n "$alpn" ]; then
-            # alpn может содержать запятые
-            local alpn_arr=""
-            local IFS_OLD2="$IFS"
-            IFS=','
+            local aa="" OLD2="$IFS"; IFS=','
             for a in $alpn; do
-                [ -n "$alpn_arr" ] && alpn_arr="${alpn_arr},"
-                alpn_arr="${alpn_arr}\"${a}\""
-            done
-            IFS="$IFS_OLD2"
-            tls_json="${tls_json},\"alpn\":[${alpn_arr}]"
-        fi
-        if [ "$allowInsecure" = "1" ] || [ "$allowInsecure" = "true" ]; then
-            tls_json="${tls_json},\"insecure\":true"
+                [ -n "$aa" ] && aa="${aa},"
+                aa="${aa}\"${a}\""
+            done; IFS="$OLD2"
+            tls="${tls},\"alpn\":[${aa}]"
         fi
 
-        # UTLS fingerprint
-        if [ -n "$fp" ]; then
-            tls_json="${tls_json},\"utls\":{\"enabled\":true,\"fingerprint\":\"${fp}\"}"
-        fi
+        [ "$insecure" = "1" ] || [ "$insecure" = "true" ] && tls="${tls},\"insecure\":true"
+        [ -n "$fp" ] && tls="${tls},\"utls\":{\"enabled\":true,\"fingerprint\":\"${fp}\"}"
 
-        # Reality
         if [ "$security" = "reality" ]; then
-            tls_json="${tls_json},\"reality\":{\"enabled\":true"
-            [ -n "$pbk" ] && tls_json="${tls_json},\"public_key\":\"${pbk}\""
-            [ -n "$sid" ] && tls_json="${tls_json},\"short_id\":\"${sid}\""
-            tls_json="${tls_json}}"
+            tls="${tls},\"reality\":{\"enabled\":true"
+            [ -n "$pbk" ] && tls="${tls},\"public_key\":\"${pbk}\""
+            [ -n "$sid" ] && tls="${tls},\"short_id\":\"${sid}\""
+            tls="${tls}}"
         fi
-
-        tls_json="${tls_json}}"
-        json="${json}${tls_json}"
+        tls="${tls}}"
+        json="${json}${tls}"
     fi
 
     # Transport
     case "$type" in
         ws)
-            local transport=",\"transport\":{\"type\":\"ws\""
-            [ -n "$ws_path" ] && transport="${transport},\"path\":\"${ws_path}\""
-            if [ -n "$ws_host" ]; then
-                transport="${transport},\"headers\":{\"Host\":\"${ws_host}\"}"
-            fi
-            transport="${transport}}"
-            json="${json}${transport}"
+            local t=",\"transport\":{\"type\":\"ws\""
+            [ -n "$path" ] && t="${t},\"path\":\"${path}\""
+            [ -n "$ws_host" ] && t="${t},\"headers\":{\"Host\":\"${ws_host}\"}"
+            t="${t}}"; json="${json}${t}"
             ;;
         xhttp|splithttp)
-            local transport=",\"transport\":{\"type\":\"httpupgrade\""
-            [ -n "$xhttp_path" ] && transport="${transport},\"path\":\"${xhttp_path}\""
-            if [ -n "$xhttp_host" ]; then
-                transport="${transport},\"host\":\"${xhttp_host}\""
-            fi
-            transport="${transport}}"
-            json="${json}${transport}"
+            local t=",\"transport\":{\"type\":\"httpupgrade\""
+            [ -n "$path" ] && t="${t},\"path\":\"${path}\""
+            [ -n "$ws_host" ] && t="${t},\"host\":\"${ws_host}\""
+            t="${t}}"; json="${json}${t}"
             ;;
         grpc)
-            local transport=",\"transport\":{\"type\":\"grpc\""
-            [ -n "$grpc_servicename" ] && transport="${transport},\"service_name\":\"${grpc_servicename}\""
-            transport="${transport}}"
-            json="${json}${transport}"
+            local t=",\"transport\":{\"type\":\"grpc\""
+            [ -n "$grpc_sn" ] && t="${t},\"service_name\":\"${grpc_sn}\""
+            t="${t}}"; json="${json}${t}"
             ;;
         http|h2)
-            local transport=",\"transport\":{\"type\":\"http\""
-            [ -n "$ws_path" ] && transport="${transport},\"path\":\"${ws_path}\""
-            if [ -n "$ws_host" ]; then
-                transport="${transport},\"host\":[\"${ws_host}\"]"
-            fi
-            transport="${transport}}"
-            json="${json}${transport}"
-            ;;
-        tcp|"")
-            # Нет дополнительного транспорта
+            local t=",\"transport\":{\"type\":\"http\""
+            [ -n "$path" ] && t="${t},\"path\":\"${path}\""
+            [ -n "$ws_host" ] && t="${t},\"host\":[\"${ws_host}\"]"
+            t="${t}}"; json="${json}${t}"
             ;;
     esac
 
     json="${json}}"
-
-    # Вывод: JSON_OUTBOUND|TAG|NAME|TYPE|TRANSPORT
     echo "${json}|${tag}|${name}|${security}|${type}"
 }
 
 # ===================== ПОДПИСКА =====================
 
 fetch_subscription() {
-    local url
+    local url cache_file
     url=$(get_config subscribe_url "")
-    local cache_file
     cache_file=$(get_config cache_file "/var/run/vlessmanager/subscribe_cache.txt")
 
-    if [ -z "$url" ]; then
-        log_error "Subscribe URL is empty"
-        return 1
-    fi
+    [ -z "$url" ] && { log_error "Subscribe URL is empty"; return 1; }
 
     log_info "Fetching subscription from: ${url}"
+    local temp="${RUN_DIR}/subscribe_temp.txt"
 
-    local temp_file="${RUN_DIR}/subscribe_temp.txt"
-
-    if curl -fsSL --connect-timeout 15 --max-time 60 -o "$temp_file" "$url" 2>/dev/null; then
-        # Проверяем, не base64 ли это
-        local first_line
-        first_line=$(head -1 "$temp_file" 2>/dev/null)
-
-        if echo "$first_line" | grep -qE '^[A-Za-z0-9+/=]+$' && ! echo "$first_line" | grep -q "://"; then
-            # Возможно, base64
-            local decoded
-            decoded=$(base64 -d "$temp_file" 2>/dev/null)
-            if [ $? -eq 0 ] && echo "$decoded" | head -1 | grep -q "://"; then
-                echo "$decoded" > "$temp_file"
-                log_info "Decoded base64 subscription"
-            fi
-        fi
-
-        # Фильтруем только vless:// строки
-        grep -E '^vless://' "$temp_file" > "$cache_file" 2>/dev/null
-
-        local count
-        count=$(wc -l < "$cache_file" 2>/dev/null || echo "0")
-        count=$(echo "$count" | tr -d ' ')
-
-        rm -f "$temp_file"
-
-        if [ "$count" -eq 0 ]; then
-            log_error "No VLESS configs found in subscription"
-            return 1
-        fi
-
-        log_info "Fetched ${count} VLESS configs"
-        return 0
-    else
-        log_error "Failed to fetch subscription from: ${url}"
-        rm -f "$temp_file"
-        return 1
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$temp" "$url" 2>/dev/null; then
+        log_error "Failed to fetch subscription"; rm -f "$temp"; return 1
     fi
+
+    # Проверка на base64
+    local first
+    first=$(head -1 "$temp" 2>/dev/null)
+    if echo "$first" | grep -qE '^[A-Za-z0-9+/=]+$' && ! echo "$first" | grep -q "://"; then
+        local decoded
+        if decoded=$(base64 -d "$temp" 2>/dev/null) && echo "$decoded" | head -1 | grep -q "://"; then
+            echo "$decoded" > "$temp"
+            log_info "Decoded base64 subscription"
+        fi
+    fi
+
+    grep -E '^vless://' "$temp" > "$cache_file" 2>/dev/null
+    rm -f "$temp"
+
+    local count
+    count=$(wc -l < "$cache_file" 2>/dev/null | tr -d ' ')
+    [ "$count" -eq 0 ] && { log_error "No VLESS configs found"; return 1; }
+
+    log_info "Fetched ${count} VLESS configs"
 }
 
-# Применение фильтров
 filter_configs() {
-    local cache_file
+    local cache_file include_regex exclude_regex transport_filter
     cache_file=$(get_config cache_file "/var/run/vlessmanager/subscribe_cache.txt")
-    local include_regex
     include_regex=$(get_config include_regex "")
-    local exclude_regex
     exclude_regex=$(get_config exclude_regex "")
-    local transport_filter
     transport_filter=$(get_config transport_filter "all")
 
-    if [ ! -f "$cache_file" ]; then
-        log_error "Cache file not found: ${cache_file}"
-        return 1
-    fi
+    [ ! -f "$cache_file" ] && { log_error "Cache file not found"; return 1; }
 
-    local filtered_file="${RUN_DIR}/filtered_configs.txt"
-    cp "$cache_file" "$filtered_file"
+    local filtered="${RUN_DIR}/filtered_configs.txt"
+    cp "$cache_file" "$filtered"
 
-    # Фильтр по include regex (по имени = часть после #)
+    # Include regex
     if [ -n "$include_regex" ]; then
-        local temp="${RUN_DIR}/filter_temp.txt"
-        : > "$temp"
+        local temp="${RUN_DIR}/filter_temp.txt"; : > "$temp"
         while IFS= read -r line; do
-            local config_name=""
-            case "$line" in
-                *"#"*)
-                    config_name=$(echo "$line" | sed 's/.*#//')
-                    config_name=$(urldecode "$config_name")
-                    ;;
-            esac
-            if echo "$config_name" | grep -qE "$include_regex"; then
-                echo "$line" >> "$temp"
-            fi
-        done < "$filtered_file"
-        mv "$temp" "$filtered_file"
-        log_info "After include filter: $(wc -l < "$filtered_file" | tr -d ' ') configs"
+            local cn=""
+            case "$line" in *"#"*) cn=$(urldecode "$(echo "$line" | sed 's/.*#//')") ;; esac
+            echo "$cn" | grep -qE "$include_regex" && echo "$line" >> "$temp"
+        done < "$filtered"
+        mv "$temp" "$filtered"
+        log_info "After include filter: $(wc -l < "$filtered" | tr -d ' ') configs"
     fi
 
-    # Фильтр по exclude regex
+    # Exclude regex
     if [ -n "$exclude_regex" ]; then
-        local temp="${RUN_DIR}/filter_temp.txt"
-        : > "$temp"
+        local temp="${RUN_DIR}/filter_temp.txt"; : > "$temp"
         while IFS= read -r line; do
-            local config_name=""
-            case "$line" in
-                *"#"*)
-                    config_name=$(echo "$line" | sed 's/.*#//')
-                    config_name=$(urldecode "$config_name")
-                    ;;
-            esac
-            if ! echo "$config_name" | grep -qE "$exclude_regex"; then
-                echo "$line" >> "$temp"
-            fi
-        done < "$filtered_file"
-        mv "$temp" "$filtered_file"
-        log_info "After exclude filter: $(wc -l < "$filtered_file" | tr -d ' ') configs"
+            local cn=""
+            case "$line" in *"#"*) cn=$(urldecode "$(echo "$line" | sed 's/.*#//')") ;; esac
+            echo "$cn" | grep -qE "$exclude_regex" || echo "$line" >> "$temp"
+        done < "$filtered"
+        mv "$temp" "$filtered"
+        log_info "After exclude filter: $(wc -l < "$filtered" | tr -d ' ') configs"
     fi
 
-    # Фильтр по типу транспорта
+    # Transport filter
     if [ "$transport_filter" != "all" ] && [ -n "$transport_filter" ]; then
-        local temp="${RUN_DIR}/filter_temp.txt"
-        : > "$temp"
+        local temp="${RUN_DIR}/filter_temp.txt"; : > "$temp"
         while IFS= read -r line; do
-            local params_part=""
-            case "$line" in
-                *"?"*)
-                    params_part=$(echo "$line" | sed 's/.*?//;s/#.*//')
-                    ;;
-            esac
-            local line_type="tcp"
-            # Извлекаем type=
-            local t
-            t=$(echo "$params_part" | tr '&' '\n' | grep '^type=' | head -1 | cut -d= -f2)
-            [ -n "$t" ] && line_type="$t"
-
-            # Проверяем, входит ли тип в фильтр
-            local match=0
-            local IFS_OLD="$IFS"
-            IFS=','
+            local pp=""
+            case "$line" in *"?"*) pp=$(echo "$line" | sed 's/.*?//;s/#.*//') ;; esac
+            local lt="tcp"
+            local tv
+            tv=$(echo "$pp" | tr '&' '\n' | grep '^type=' | head -1 | cut -d= -f2)
+            [ -n "$tv" ] && lt="$tv"
+            local match=0 OLD3="$IFS"; IFS=','
             for ft in $transport_filter; do
-                if [ "$ft" = "$line_type" ]; then
-                    match=1
-                    break
-                fi
-            done
-            IFS="$IFS_OLD"
-
-            if [ "$match" -eq 1 ]; then
-                echo "$line" >> "$temp"
-            fi
-        done < "$filtered_file"
-        mv "$temp" "$filtered_file"
-        log_info "After transport filter: $(wc -l < "$filtered_file" | tr -d ' ') configs"
+                [ "$ft" = "$lt" ] && { match=1; break; }
+            done; IFS="$OLD3"
+            [ "$match" -eq 1 ] && echo "$line" >> "$temp"
+        done < "$filtered"
+        mv "$temp" "$filtered"
+        log_info "After transport filter: $(wc -l < "$filtered" | tr -d ' ') configs"
     fi
 
-    local final_count
-    final_count=$(wc -l < "$filtered_file" 2>/dev/null | tr -d ' ')
-
-    if [ "$final_count" -eq 0 ]; then
-        log_warn "No configs remaining after filtering"
-        return 1
-    fi
-
-    log_info "Final filtered configs: ${final_count}"
-    return 0
+    local fc
+    fc=$(wc -l < "$filtered" 2>/dev/null | tr -d ' ')
+    [ "$fc" -eq 0 ] && { log_warn "No configs after filtering"; return 1; }
+    log_info "Final filtered configs: ${fc}"
 }
 
 # ===================== SING-BOX КОНФИГ =====================
 
 generate_singbox_config() {
-    local filtered_file="${RUN_DIR}/filtered_configs.txt"
+    local filtered="${RUN_DIR}/filtered_configs.txt"
     local singbox_config
     singbox_config=$(get_config singbox_config "/var/run/vlessmanager/singbox.json")
 
-    if [ ! -f "$filtered_file" ]; then
-        log_error "Filtered configs not found"
-        return 1
-    fi
+    [ ! -f "$filtered" ] && { log_error "Filtered configs not found"; return 1; }
 
-    local urltest_url
+    local urltest_url urltest_interval urltest_tolerance urltest_timeout
+    local tun_address tun_address6 tun_mtu interface_name dns_server
+    local log_level tun_stack
+
     urltest_url=$(get_config urltest_url "https://www.gstatic.com/generate_204")
-    local urltest_interval
     urltest_interval=$(get_config urltest_interval "300")
-    local urltest_tolerance
     urltest_tolerance=$(get_config urltest_tolerance "50")
-    local urltest_timeout
     urltest_timeout=$(get_config urltest_timeout "5000")
-    local tun_address
     tun_address=$(get_config tun_address "172.19.0.1/30")
-    local tun_address6
     tun_address6=$(get_config tun_address6 "fdfe:dcba:9876::1/126")
-    local tun_mtu
     tun_mtu=$(get_config tun_mtu "9000")
-    local interface_name
     interface_name=$(get_config interface_name "vlessmanager")
-    local dns_server
     dns_server=$(get_config dns_server "1.1.1.1")
-    local log_level
     log_level=$(get_config log_level "warn")
-    local tun_stack
     tun_stack=$(get_config tun_stack "mixed")
 
-    # Парсим все конфиги
-    local outbounds_json=""
-    local tags_json=""
-    local idx=0
+    local outbounds_json="" tags_json="" idx=0
 
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        # Убираем \r
         line=$(echo "$line" | tr -d '\r')
-
         idx=$((idx + 1))
+
         local parsed
         parsed=$(parse_vless_link "$line" "$idx")
+        [ -z "$parsed" ] && { log_warn "Failed to parse config #${idx}"; continue; }
 
-        if [ -z "$parsed" ]; then
-            log_warn "Failed to parse config #${idx}"
-            continue
-        fi
-
-        local outbound_json tag config_name sec trans
-        outbound_json=$(echo "$parsed" | cut -d'|' -f1)
+        local oj tag
+        oj=$(echo "$parsed" | cut -d'|' -f1)
         tag=$(echo "$parsed" | cut -d'|' -f2)
-        config_name=$(echo "$parsed" | cut -d'|' -f3)
 
-        if [ -n "$outbounds_json" ]; then
-            outbounds_json="${outbounds_json},"
-        fi
-        outbounds_json="${outbounds_json}${outbound_json}"
-
-        if [ -n "$tags_json" ]; then
-            tags_json="${tags_json},"
-        fi
+        [ -n "$outbounds_json" ] && outbounds_json="${outbounds_json},"
+        outbounds_json="${outbounds_json}${oj}"
+        [ -n "$tags_json" ] && tags_json="${tags_json},"
         tags_json="${tags_json}\"${tag}\""
+    done < "$filtered"
 
-        log_debug "Parsed config: ${config_name} -> ${tag}"
-    done < "$filtered_file"
+    [ -z "$outbounds_json" ] && { log_error "No valid outbounds"; return 1; }
 
-    if [ -z "$outbounds_json" ]; then
-        log_error "No valid outbounds generated"
-        return 1
-    fi
-
-    # Создаём полный конфиг sing-box
     cat > "$singbox_config" <<SINGBOXEOF
 {
     "log": {
@@ -615,36 +434,23 @@ generate_singbox_config() {
 }
 SINGBOXEOF
 
-    # Валидация конфига
     if command -v sing-box >/dev/null 2>&1; then
-        if sing-box check -c "$singbox_config" 2>/dev/null; then
-            log_info "Sing-box config validated successfully"
-        else
-            log_error "Sing-box config validation failed!"
-            log_error "$(sing-box check -c "$singbox_config" 2>&1)"
+        if ! sing-box check -c "$singbox_config" 2>/dev/null; then
+            log_error "Config validation failed: $(sing-box check -c "$singbox_config" 2>&1)"
             return 1
         fi
     fi
 
     log_info "Generated sing-box config with ${idx} outbounds"
-    return 0
 }
 
-# ===================== СЕТЕВОЙ ИНТЕРФЕЙС =====================
+# ===================== ИНТЕРФЕЙС И FIREWALL =====================
 
 setup_network_interface() {
     local interface_name
     interface_name=$(get_config interface_name "vlessmanager")
-    local tun_mtu
-    tun_mtu=$(get_config tun_mtu "9000")
 
-    log_info "Setting up network interface: ${interface_name}"
-
-    # Создаём интерфейс в /etc/config/network если его нет
-    local existing
-    existing=$(uci -q get "network.${interface_name}" 2>/dev/null)
-
-    if [ -z "$existing" ]; then
+    if ! uci -q get "network.${interface_name}" >/dev/null 2>&1; then
         uci set "network.${interface_name}=interface"
         uci set "network.${interface_name}.proto=none"
         uci set "network.${interface_name}.device=${interface_name}"
@@ -655,21 +461,16 @@ setup_network_interface() {
         log_info "Created network interface: ${interface_name}"
     fi
 
-    # Создаём firewall зону если нет
-    local fw_zone_exists=0
-    local i=0
+    local fw_exists=0 i=0
     while true; do
-        local zname
-        zname=$(uci -q get "firewall.@zone[${i}].name" 2>/dev/null)
-        [ -z "$zname" ] && break
-        if [ "$zname" = "${interface_name}" ]; then
-            fw_zone_exists=1
-            break
-        fi
+        local zn
+        zn=$(uci -q get "firewall.@zone[${i}].name" 2>/dev/null)
+        [ -z "$zn" ] && break
+        [ "$zn" = "$interface_name" ] && { fw_exists=1; break; }
         i=$((i + 1))
     done
 
-    if [ "$fw_zone_exists" -eq 0 ]; then
+    if [ "$fw_exists" -eq 0 ]; then
         uci add firewall zone
         uci set "firewall.@zone[-1].name=${interface_name}"
         uci set "firewall.@zone[-1].input=REJECT"
@@ -679,7 +480,6 @@ setup_network_interface() {
         uci set "firewall.@zone[-1].mtu_fix=1"
         uci add_list "firewall.@zone[-1].network=${interface_name}"
 
-        # Forwarding: lan -> vlessmanager
         uci add firewall forwarding
         uci set "firewall.@forwarding[-1].src=lan"
         uci set "firewall.@forwarding[-1].dest=${interface_name}"
@@ -693,69 +493,59 @@ remove_network_interface() {
     local interface_name
     interface_name=$(get_config interface_name "vlessmanager")
 
-    # Удаляем сетевой интерфейс
     uci -q delete "network.${interface_name}" 2>/dev/null
     uci commit network 2>/dev/null
 
-    # Удаляем firewall зону
     local i=0
     while true; do
-        local zname
-        zname=$(uci -q get "firewall.@zone[${i}].name" 2>/dev/null)
-        [ -z "$zname" ] && break
-        if [ "$zname" = "${interface_name}" ]; then
-            uci delete "firewall.@zone[${i}]"
-            break
+        local zn
+        zn=$(uci -q get "firewall.@zone[${i}].name" 2>/dev/null)
+        [ -z "$zn" ] && break
+        if [ "$zn" = "$interface_name" ]; then
+            uci delete "firewall.@zone[${i}]"; break
         fi
         i=$((i + 1))
     done
 
-    # Удаляем forwarding
     i=0
     while true; do
-        local fdest
-        fdest=$(uci -q get "firewall.@forwarding[${i}].dest" 2>/dev/null)
-        [ -z "$fdest" ] && break
-        if [ "$fdest" = "${interface_name}" ]; then
-            uci delete "firewall.@forwarding[${i}]"
-            break
+        local fd
+        fd=$(uci -q get "firewall.@forwarding[${i}].dest" 2>/dev/null)
+        [ -z "$fd" ] && break
+        if [ "$fd" = "$interface_name" ]; then
+            uci delete "firewall.@forwarding[${i}]"; break
         fi
         i=$((i + 1))
     done
-
     uci commit firewall 2>/dev/null
-    log_info "Removed network interface and firewall zone: ${interface_name}"
+    log_info "Removed interface: ${interface_name}"
 }
 
-# ===================== УПРАВЛЕНИЕ SING-BOX =====================
+# ===================== SING-BOX CONTROL =====================
 
 start_singbox() {
     local singbox_config
     singbox_config=$(get_config singbox_config "/var/run/vlessmanager/singbox.json")
-
-    if [ ! -f "$singbox_config" ]; then
-        log_error "Sing-box config not found: ${singbox_config}"
-        return 1
-    fi
+    [ ! -f "$singbox_config" ] && { log_error "Config not found"; return 1; }
 
     stop_singbox
-
     log_info "Starting sing-box..."
 
     sing-box run -c "$singbox_config" &
     local pid=$!
     echo "$pid" > "$PID_FILE"
-
-    # Ждём запуска
-    sleep 2
+    sleep 3
 
     if kill -0 "$pid" 2>/dev/null; then
-        log_info "Sing-box started with PID: ${pid}"
-
-        # Перезагружаем сеть для поднятия интерфейса
+        log_info "Sing-box started PID: ${pid}"
         /etc/init.d/network reload 2>/dev/null &
 
-        update_status "running" "Sing-box running" "" "$(wc -l < "${RUN_DIR}/filtered_configs.txt" 2>/dev/null | tr -d ' ')" "$(date '+%Y-%m-%d %H:%M:%S')"
+        local sc
+        sc=$(wc -l < "${RUN_DIR}/filtered_configs.txt" 2>/dev/null | tr -d ' ')
+        update_status "running" "Sing-box running, healthy" "" "$sc" "$(date '+%Y-%m-%d %H:%M:%S')"
+
+        # Запускаем healthcheck демон
+        /usr/bin/vlessmanager-urltest start
         return 0
     else
         log_error "Sing-box failed to start"
@@ -766,264 +556,125 @@ start_singbox() {
 }
 
 stop_singbox() {
+    # Останавливаем healthcheck
+    /usr/bin/vlessmanager-urltest stop 2>/dev/null
+
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
-            log_info "Stopping sing-box (PID: ${pid})..."
-            kill "$pid" 2>/dev/null
-            sleep 2
+            log_info "Stopping sing-box PID: ${pid}"
+            kill "$pid" 2>/dev/null; sleep 2
             kill -9 "$pid" 2>/dev/null
         fi
         rm -f "$PID_FILE"
     fi
-
-    # На всякий случай
     killall -q sing-box 2>/dev/null
-
-    update_status "stopped" "Sing-box stopped" "" "0" ""
+    update_status "stopped" "Stopped" "" "0" ""
 }
 
 is_singbox_running() {
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# ===================== URLTEST ПРОВЕРКА =====================
-
-check_servers_available() {
-    local urltest_url
-    urltest_url=$(get_config urltest_url "https://www.gstatic.com/generate_204")
-    local urltest_timeout
-    urltest_timeout=$(get_config urltest_timeout "5000")
-    local interface_name
-    interface_name=$(get_config interface_name "vlessmanager")
-
-    if ! is_singbox_running; then
-        return 1
-    fi
-
-    # Проверяем через TUN интерфейс
-    local timeout_sec=$(( urltest_timeout / 1000 ))
-    [ "$timeout_sec" -lt 1 ] && timeout_sec=5
-
-    if curl -fsSL --interface "$interface_name" --connect-timeout "$timeout_sec" --max-time "$((timeout_sec * 2))" -o /dev/null "$urltest_url" 2>/dev/null; then
-        log_debug "URL test passed"
-        return 0
-    else
-        log_warn "URL test failed - no available servers"
-        return 1
-    fi
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
 }
 
 # ===================== ПОЛНЫЙ ЦИКЛ =====================
 
 full_update() {
-    log_info "Starting full update cycle..."
-
-    if ! fetch_subscription; then
-        log_error "Failed to fetch subscription"
-        update_status "error" "Failed to fetch subscription" "" "0" ""
-        return 1
-    fi
-
-    if ! filter_configs; then
-        log_error "No configs after filtering"
-        update_status "error" "No configs after filtering" "" "0" ""
-        return 1
-    fi
-
-    if ! generate_singbox_config; then
-        log_error "Failed to generate sing-box config"
-        update_status "error" "Config generation failed" "" "0" ""
-        return 1
-    fi
-
+    log_info "Starting full update..."
+    fetch_subscription || { update_status "error" "Fetch failed" "" "0" ""; return 1; }
+    filter_configs || { update_status "error" "No configs after filter" "" "0" ""; return 1; }
+    generate_singbox_config || { update_status "error" "Config gen failed" "" "0" ""; return 1; }
     setup_network_interface
-
-    if ! start_singbox; then
-        log_error "Failed to start sing-box"
-        return 1
-    fi
-
-    log_info "Full update cycle completed successfully"
-    return 0
-}
-
-# ===================== WATCHDOG / CRON =====================
-
-watchdog_check() {
-    local enabled
-    enabled=$(get_config enabled "0")
-
-    if [ "$enabled" != "1" ]; then
-        return 0
-    fi
-
-    if ! is_singbox_running; then
-        local auto_restart
-        auto_restart=$(get_config auto_restart "1")
-        if [ "$auto_restart" = "1" ]; then
-            log_warn "Sing-box not running, restarting..."
-            full_update
-        fi
-        return 0
-    fi
-
-    local auto_refresh
-    auto_refresh=$(get_config auto_refresh_on_fail "1")
-
-    if [ "$auto_refresh" = "1" ]; then
-        if ! check_servers_available; then
-            local max_attempts
-            max_attempts=$(get_config max_refresh_attempts "3")
-            local attempt=0
-
-            while [ "$attempt" -lt "$max_attempts" ]; do
-                attempt=$((attempt + 1))
-                log_warn "No available servers, refresh attempt ${attempt}/${max_attempts}"
-
-                if full_update; then
-                    sleep 5
-                    if check_servers_available; then
-                        log_info "Servers available after refresh"
-                        return 0
-                    fi
-                fi
-
-                sleep 10
-            done
-
-            log_error "All refresh attempts exhausted"
-            update_status "error" "No available servers after ${max_attempts} refresh attempts" "" "0" ""
-        fi
-    fi
+    start_singbox || return 1
+    log_info "Full update completed"
 }
 
 setup_cron() {
-    local enabled
+    local enabled update_interval
     enabled=$(get_config enabled "0")
-    local update_interval
     update_interval=$(get_config update_interval "60")
 
-    # Удаляем старые записи
     crontab -l 2>/dev/null | grep -v "$PROG_NAME" | crontab - 2>/dev/null
 
     if [ "$enabled" = "1" ]; then
         local cron_entry
-
         if [ "$update_interval" -le 59 ]; then
             cron_entry="*/${update_interval} * * * * /usr/bin/${PROG_NAME} cron_update"
-        elif [ "$update_interval" -le 1439 ]; then
-            local hours=$((update_interval / 60))
-            if [ "$hours" -ge 1 ]; then
-                cron_entry="0 */${hours} * * * /usr/bin/${PROG_NAME} cron_update"
-            else
-                cron_entry="*/${update_interval} * * * * /usr/bin/${PROG_NAME} cron_update"
-            fi
         else
-            cron_entry="0 0 * * * /usr/bin/${PROG_NAME} cron_update"
+            local h=$((update_interval / 60))
+            [ "$h" -ge 1 ] && cron_entry="0 */${h} * * * /usr/bin/${PROG_NAME} cron_update"
+            [ "$h" -lt 1 ] && cron_entry="*/${update_interval} * * * * /usr/bin/${PROG_NAME} cron_update"
         fi
 
-        # Watchdog каждые 5 минут
-        local watchdog_entry="*/5 * * * * /usr/bin/${PROG_NAME} watchdog"
-
-        (crontab -l 2>/dev/null; echo "$cron_entry"; echo "$watchdog_entry") | crontab - 2>/dev/null
-        log_info "Cron jobs set: update every ${update_interval}min, watchdog every 5min"
+        (crontab -l 2>/dev/null; echo "$cron_entry") | crontab - 2>/dev/null
+        log_info "Cron: update every ${update_interval}min"
     fi
 }
 
-# ===================== RPC ОБРАБОТЧИКИ (для LuCI) =====================
+# ===================== RPC =====================
 
 rpc_get_status() {
     if [ -f "$STATUS_FILE" ]; then
-        cat "$STATUS_FILE"
+        # Добавляем healthcheck информацию
+        local hc_status
+        hc_status=$(/usr/bin/vlessmanager-urltest status 2>/dev/null || echo '{"running":false}')
+        local base
+        base=$(cat "$STATUS_FILE")
+        # Вставляем healthcheck в JSON
+        echo "$base" | sed "s/}$/,\"healthcheck\":${hc_status}}/"
     else
-        echo '{"status":"unknown","message":"No status available","server_count":0}'
+        echo '{"status":"unknown","message":"No status","server_count":0,"healthcheck":{"running":false}}'
     fi
 }
 
 rpc_get_servers() {
-    local filtered_file="${RUN_DIR}/filtered_configs.txt"
-    if [ ! -f "$filtered_file" ]; then
-        echo '{"servers":[]}'
-        return
+    local filtered="${RUN_DIR}/filtered_configs.txt"
+    if [ ! -f "$filtered" ]; then
+        echo '{"servers":[],"count":0}'; return
     fi
 
-    local servers="["
-    local first=1
-    local idx=0
-
+    local servers="[" first=1 idx=0
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         line=$(echo "$line" | tr -d '\r')
         idx=$((idx + 1))
 
         local name=""
-        case "$line" in
-            *"#"*)
-                name=$(echo "$line" | sed 's/.*#//')
-                name=$(urldecode "$name")
-                ;;
-        esac
+        case "$line" in *"#"*) name=$(urldecode "$(echo "$line" | sed 's/.*#//')") ;; esac
         [ -z "$name" ] && name="server-${idx}"
 
-        local params_part=""
-        case "$line" in
-            *"?"*)
-                params_part=$(echo "$line" | sed 's/.*?//;s/#.*//')
-                ;;
-        esac
-
-        local transport="tcp"
-        local t
-        t=$(echo "$params_part" | tr '&' '\n' | grep '^type=' | head -1 | cut -d= -f2)
+        local pp=""
+        case "$line" in *"?"*) pp=$(echo "$line" | sed 's/.*?//;s/#.*//') ;; esac
+        local transport="tcp" security="none"
+        local t s
+        t=$(echo "$pp" | tr '&' '\n' | grep '^type=' | head -1 | cut -d= -f2)
         [ -n "$t" ] && transport="$t"
-
-        local security="none"
-        local s
-        s=$(echo "$params_part" | tr '&' '\n' | grep '^security=' | head -1 | cut -d= -f2)
+        s=$(echo "$pp" | tr '&' '\n' | grep '^security=' | head -1 | cut -d= -f2)
         [ -n "$s" ] && security="$s"
 
         local stripped="${line#vless://}"
         stripped=$(echo "$stripped" | sed 's/#.*//' | sed 's/?.*//')
-        local hostport
+        local hostport host port
         hostport=$(echo "$stripped" | sed 's/.*@//')
-        local host port
         case "$hostport" in
-            "["*"]"*)
-                host=$(echo "$hostport" | sed 's/\[\(.*\)\].*/\1/')
-                port=$(echo "$hostport" | sed 's/.*\]://')
-                ;;
-            *)
-                host=$(echo "$hostport" | cut -d: -f1)
-                port=$(echo "$hostport" | cut -d: -f2)
-                ;;
+            "["*"]"*) host=$(echo "$hostport" | sed 's/\[\(.*\)\].*/\1/'); port=$(echo "$hostport" | sed 's/.*\]://') ;;
+            *) host=$(echo "$hostport" | cut -d: -f1); port=$(echo "$hostport" | cut -d: -f2) ;;
         esac
 
-        # Экранируем имя для JSON
-        name=$(echo "$name" | sed 's/"/\\"/g; s/\\/\\\\/g')
-
+        name=$(echo "$name" | sed 's/"/\\"/g')
         [ "$first" -eq 0 ] && servers="${servers},"
         first=0
         servers="${servers}{\"name\":\"${name}\",\"host\":\"${host}\",\"port\":${port:-443},\"transport\":\"${transport}\",\"security\":\"${security}\"}"
-    done < "$filtered_file"
+    done < "$filtered"
 
     servers="${servers}]"
     echo "{\"servers\":${servers},\"count\":${idx}}"
 }
 
 rpc_get_log() {
-    local log_file
+    local log_file lines
     log_file=$(get_config log_file "/var/log/vlessmanager.log")
-    local lines="${1:-50}"
-
+    lines="${1:-50}"
     if [ -f "$log_file" ]; then
         local content
         content=$(tail -n "$lines" "$log_file" 2>/dev/null | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
@@ -1033,6 +684,10 @@ rpc_get_log() {
     fi
 }
 
+rpc_healthcheck() {
+    /usr/bin/vlessmanager-urltest check
+}
+
 # ===================== MAIN =====================
 
 main() {
@@ -1040,93 +695,43 @@ main() {
 
     case "$1" in
         start)
-            local enabled
-            enabled=$(get_config enabled "0")
-            if [ "$enabled" != "1" ]; then
-                log_info "VlessManager is disabled"
-                echo "VlessManager is disabled. Enable it in GUI first."
-                return 0
-            fi
+            [ "$(get_config enabled 0)" != "1" ] && { echo "Disabled"; return 0; }
             acquire_lock || return 1
-            full_update
-            setup_cron
-            release_lock
-            ;;
+            full_update; setup_cron
+            release_lock ;;
         stop)
             acquire_lock || return 1
-            stop_singbox
-            remove_network_interface
-            # Удаляем cron
+            stop_singbox; remove_network_interface
             crontab -l 2>/dev/null | grep -v "$PROG_NAME" | crontab - 2>/dev/null
-            release_lock
-            ;;
+            release_lock ;;
         restart)
             acquire_lock || return 1
-            stop_singbox
-            sleep 2
-            local enabled
-            enabled=$(get_config enabled "0")
-            if [ "$enabled" = "1" ]; then
-                full_update
-                setup_cron
-            fi
-            release_lock
-            ;;
+            stop_singbox; sleep 2
+            [ "$(get_config enabled 0)" = "1" ] && { full_update; setup_cron; }
+            release_lock ;;
         update)
             acquire_lock || return 1
             full_update
-            release_lock
-            ;;
+            release_lock ;;
         cron_update)
             acquire_lock || return 1
-            fetch_subscription && filter_configs && generate_singbox_config
-            if is_singbox_running; then
-                stop_singbox
-                sleep 1
-                start_singbox
+            if fetch_subscription && filter_configs && generate_singbox_config; then
+                if is_singbox_running; then
+                    stop_singbox; sleep 1; start_singbox
+                fi
             fi
-            release_lock
-            ;;
-        watchdog)
-            watchdog_check
-            ;;
-        status)
-            rpc_get_status
-            ;;
-        servers)
-            rpc_get_servers
-            ;;
-        log)
-            rpc_get_log "${2:-50}"
-            ;;
-        setup_cron)
-            setup_cron
-            ;;
+            release_lock ;;
+        status)     rpc_get_status ;;
+        servers)    rpc_get_servers ;;
+        log)        rpc_get_log "${2:-50}" ;;
+        healthcheck) rpc_healthcheck ;;
         check)
-            if is_singbox_running; then
-                echo '{"running":true}'
-            else
-                echo '{"running":false}'
-            fi
-            ;;
-        version)
-            echo "{\"version\":\"${VERSION}\"}"
-            ;;
+            if is_singbox_running; then echo '{"running":true}'
+            else echo '{"running":false}'; fi ;;
+        version)    echo "{\"version\":\"${VERSION}\"}" ;;
         *)
-            echo "Usage: $0 {start|stop|restart|update|status|servers|log|check|version}"
-            echo ""
-            echo "Commands:"
-            echo "  start      - Start VlessManager"
-            echo "  stop       - Stop VlessManager"
-            echo "  restart    - Restart VlessManager"
-            echo "  update     - Force update subscription and restart"
-            echo "  status     - Show current status (JSON)"
-            echo "  servers    - Show server list (JSON)"
-            echo "  log [N]    - Show last N log lines (JSON)"
-            echo "  check      - Check if sing-box is running"
-            echo "  version    - Show version"
-            return 1
-            ;;
+            echo "Usage: $0 {start|stop|restart|update|status|servers|log|healthcheck|check|version}"
+            return 1 ;;
     esac
 }
 
