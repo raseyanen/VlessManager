@@ -21,10 +21,10 @@ jobs:
         include:
           - name: openwrt-24.10.0
             sdk_page: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/
-            cache_key: sdk-24.10.0-v5
+            cache_key: sdk-24.10.0-v6
           - name: openwrt-snapshot
             sdk_page: https://downloads.openwrt.org/snapshots/targets/x86/64/
-            cache_key: sdk-snapshot-v5
+            cache_key: sdk-snapshot-v6
 
     steps:
       - name: Checkout
@@ -57,6 +57,7 @@ jobs:
           SDK_FILE="$(printf '%s' "$HTML" | grep -Eo 'openwrt-sdk-[^"]+\.(tar\.zst|tar\.xz|tar\.gz)' | head -n1)"
           test -n "$SDK_FILE"
 
+          echo "Found SDK: $SDK_FILE"
           wget -q "${SDK_PAGE}${SDK_FILE}" -O sdk-archive
 
           mkdir -p sdk
@@ -69,48 +70,32 @@ jobs:
 
           rm -f sdk-archive
 
-      - name: Prepare custom feed
+      - name: Prepare package inside SDK
         run: |
           set -eux
 
-          rm -rf custom-feed
-          mkdir -p custom-feed/${PKG_NAME}
-          rsync -a --delete luci-app-vlessmanager/ custom-feed/${PKG_NAME}/
+          rm -rf sdk/package/${PKG_NAME}
+          mkdir -p sdk/package/${PKG_NAME}
+          rsync -a --delete luci-app-vlessmanager/ sdk/package/${PKG_NAME}/
 
-          # Чистим следы старых feed установок внутри sdk
-          rm -rf sdk/feeds/custom
-          rm -rf sdk/package/feeds/custom
+          echo "=== Package files ==="
+          find sdk/package/${PKG_NAME} -maxdepth 3 -type f | sort
 
-          # Удаляем старые строки custom feed если были
-          sed -i '/^src-link custom /d' sdk/feeds.conf.default
-
-          FEED_DIR="$(cd custom-feed && pwd)"
-          echo "src-link custom ${FEED_DIR}" >> sdk/feeds.conf.default
-
-          echo "=== feeds.conf.default ==="
-          cat sdk/feeds.conf.default
-
-      - name: Update only needed feeds
+      - name: Update feeds
         run: |
           set -eux
           cd sdk
 
           ./scripts/feeds update packages
           ./scripts/feeds update luci
-          ./scripts/feeds update custom
 
-      - name: Install only required packages
+      - name: Install required dependencies metadata
         run: |
           set -eux
           cd sdk
 
-          ./scripts/feeds install -p packages curl sing-box
-          ./scripts/feeds install -p luci luci-base
-          ./scripts/feeds install -p custom ${PKG_NAME}
-
-          echo "=== Check installed package ==="
-          ls -la package/feeds/custom/${PKG_NAME}
-          test -f package/feeds/custom/${PKG_NAME}/Makefile
+          ./scripts/feeds install -p packages curl sing-box || true
+          ./scripts/feeds install -p luci luci-base || true
 
       - name: Configure build
         run: |
@@ -124,19 +109,27 @@ jobs:
 
           make defconfig
 
+          echo "=== Check package visibility ==="
+          test -f package/${PKG_NAME}/Makefile
+          grep "CONFIG_PACKAGE_${PKG_NAME}" .config || true
+
       - name: Build package
         run: |
           set -eux
           cd sdk
 
-          make package/feeds/custom/${PKG_NAME}/compile V=s -j"$(nproc)" || \
-          make package/feeds/custom/${PKG_NAME}/compile V=s -j1
+          make package/${PKG_NAME}/compile V=s -j"$(nproc)" || \
+          make package/${PKG_NAME}/compile V=s -j1 V=s
 
       - name: Collect artifacts
         run: |
           set -eux
           mkdir -p artifacts
-          find sdk/bin/ -type f \( -name "${PKG_NAME}*.apk" -o -name "${PKG_NAME}*.ipk" \) -exec cp {} artifacts/ \;
+
+          find sdk/bin/ -type f \( -name "${PKG_NAME}*.apk" -o -name "${PKG_NAME}*.ipk" \) \
+            -exec cp {} artifacts/ \;
+
+          echo "=== Artifacts ==="
           ls -la artifacts/
 
       - name: Upload artifacts
@@ -145,117 +138,3 @@ jobs:
           name: ${{ env.PKG_NAME }}-${{ matrix.name }}
           path: artifacts/
           retention-days: 90
-
-  # ============================================
-  # Universal tarball (не требует SDK)
-  # ============================================
-  build-universal:
-    name: Build universal archive
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Create installable archive
-        run: |
-          set -eux
-          SRC="luci-app-vlessmanager/root"
-          JS_SRC="luci-app-vlessmanager/htdocs/luci-static/resources/view/vlessmanager"
-          OUT="build/data"
-
-          mkdir -p "${OUT}/etc/config"
-          mkdir -p "${OUT}/etc/init.d"
-          mkdir -p "${OUT}/etc/uci-defaults"
-          mkdir -p "${OUT}/usr/bin"
-          mkdir -p "${OUT}/usr/share/luci/menu.d"
-          mkdir -p "${OUT}/usr/share/rpcd/acl.d"
-          mkdir -p "${OUT}/www/luci-static/resources/view/vlessmanager"
-
-          cp "${SRC}/etc/config/vlessmanager"          "${OUT}/etc/config/"
-          cp "${SRC}/etc/init.d/vlessmanager"          "${OUT}/etc/init.d/"
-          cp "${SRC}/etc/uci-defaults/99-vlessmanager" "${OUT}/etc/uci-defaults/"
-          cp "${SRC}/usr/bin/vlessmanager"              "${OUT}/usr/bin/"
-          cp "${SRC}/usr/bin/vlessmanager-urltest"      "${OUT}/usr/bin/"
-          cp "${SRC}/usr/share/luci/menu.d/luci-app-vlessmanager.json"  "${OUT}/usr/share/luci/menu.d/"
-          cp "${SRC}/usr/share/rpcd/acl.d/luci-app-vlessmanager.json"   "${OUT}/usr/share/rpcd/acl.d/"
-          cp "${JS_SRC}/settings.js"                   "${OUT}/www/luci-static/resources/view/vlessmanager/"
-
-          chmod +x "${OUT}/etc/init.d/vlessmanager"
-          chmod +x "${OUT}/etc/uci-defaults/99-vlessmanager"
-          chmod +x "${OUT}/usr/bin/vlessmanager"
-          chmod +x "${OUT}/usr/bin/vlessmanager-urltest"
-
-          # Создаём install.sh
-          cat > build/install.sh << 'INSTALLER'
-          #!/bin/sh
-          set -e
-          echo "=== Installing VlessManager ==="
-          D="$(cd "$(dirname "$0")/data" && pwd)"
-
-          # Зависимости
-          if command -v apk >/dev/null 2>&1; then
-            apk update && apk add sing-box curl || true
-          elif command -v opkg >/dev/null 2>&1; then
-            opkg update && opkg install sing-box curl || true
-          fi
-
-          cp -f "$D/etc/config/vlessmanager" /etc/config/ 2>/dev/null || true
-          cp -f "$D/etc/init.d/vlessmanager" /etc/init.d/
-          cp -f "$D/usr/bin/vlessmanager" /usr/bin/
-          cp -f "$D/usr/bin/vlessmanager-urltest" /usr/bin/
-          mkdir -p /usr/share/luci/menu.d /usr/share/rpcd/acl.d
-          cp -f "$D/usr/share/luci/menu.d/"*.json /usr/share/luci/menu.d/
-          cp -f "$D/usr/share/rpcd/acl.d/"*.json /usr/share/rpcd/acl.d/
-          mkdir -p /www/luci-static/resources/view/vlessmanager
-          cp -f "$D/www/luci-static/resources/view/vlessmanager/"*.js \
-            /www/luci-static/resources/view/vlessmanager/
-
-          chmod +x /etc/init.d/vlessmanager /usr/bin/vlessmanager /usr/bin/vlessmanager-urltest
-          sh "$D/etc/uci-defaults/99-vlessmanager"
-          /etc/init.d/vlessmanager enable 2>/dev/null || true
-          /etc/init.d/rpcd restart 2>/dev/null || true
-          /etc/init.d/uhttpd restart 2>/dev/null || true
-          echo "=== Done. Open LuCI -> VPN -> VlessManager ==="
-          INSTALLER
-          chmod +x build/install.sh
-
-          mkdir -p artifacts
-          tar czf "artifacts/${PKG_NAME}-universal.tar.gz" -C build .
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.PKG_NAME }}-universal
-          path: artifacts/
-          retention-days: 90
-
-  # ============================================
-  # Release (при теге)
-  # ============================================
-  release:
-    name: Create Release
-    needs: [ build, build-universal ]
-    runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all-artifacts/
-
-      - name: Prepare release
-        run: |
-          mkdir -p release
-          find all-artifacts/ -type f \( -name "*.apk" -o -name "*.ipk" -o -name "*.tar.gz" \) \
-            -exec cp {} release/ \;
-          ls -la release/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/*
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
