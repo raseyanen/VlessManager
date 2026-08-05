@@ -1,0 +1,339 @@
+#!/bin/sh
+# luci-app-vlessmanager/root/usr/bin/vlessmanager-urltest
+# Активный health-check демон
+# Каждые N минут проверяет доступность текущего сервера через TUN
+# При недоступности — перезапускает sing-box (sing-box сам выберет
+# следующий через встроенный urltest) или обновляет подписку
+
+PROG_NAME="vlessmanager-urltest"
+RUN_DIR="/var/run/vlessmanager"
+STATUS_FILE="${RUN_DIR}/status.json"
+HEALTHCHECK_PID="${RUN_DIR}/healthcheck.pid"
+FAIL_COUNT_FILE="${RUN_DIR}/healthcheck_fails"
+
+get_config() {
+    local key="$1"
+    local default="$2"
+    local val
+    val=$(uci -q get "vlessmanager.main.${key}" 2>/dev/null)
+    [ -z "$val" ] && echo "$default" || echo "$val"
+}
+
+log_msg() {
+    local level="$1"
+    shift
+    local log_file
+    log_file=$(get_config log_file "/var/log/vlessmanager.log")
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${ts}] [HEALTHCHECK] [${level}] $*" >> "$log_file"
+}
+
+get_fail_count() {
+    if [ -f "$FAIL_COUNT_FILE" ]; then
+        cat "$FAIL_COUNT_FILE" 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+set_fail_count() {
+    echo "$1" > "$FAIL_COUNT_FILE"
+}
+
+update_status_field() {
+    # Обновляем message в status.json
+    if [ -f "$STATUS_FILE" ]; then
+        local tmp="${STATUS_FILE}.tmp"
+        sed "s/\"message\":\"[^\"]*\"/\"message\":\"$1\"/" "$STATUS_FILE" > "$tmp" 2>/dev/null
+        mv "$tmp" "$STATUS_FILE" 2>/dev/null
+    fi
+}
+
+# Проверяет доступность через TUN интерфейс
+check_connectivity() {
+    local urltest_url
+    urltest_url=$(get_config urltest_url "https://www.gstatic.com/generate_204")
+    local urltest_timeout
+    urltest_timeout=$(get_config urltest_timeout "5000")
+    local interface_name
+    interface_name=$(get_config interface_name "vlessmanager")
+
+    local timeout_sec=$(( urltest_timeout / 1000 ))
+    [ "$timeout_sec" -lt 2 ] && timeout_sec=5
+
+    # Проверяем существование интерфейса
+    if ! ip link show "$interface_name" >/dev/null 2>&1; then
+        log_msg "WARN" "Interface ${interface_name} does not exist"
+        return 1
+    fi
+
+    # Пробуем запрос через TUN
+    local http_code
+    http_code=$(curl -fsSL \
+        --interface "$interface_name" \
+        --connect-timeout "$timeout_sec" \
+        --max-time "$((timeout_sec * 2))" \
+        -o /dev/null \
+        -w "%{http_code}" \
+        "$urltest_url" 2>/dev/null) || http_code="000"
+
+    case "$http_code" in
+        200|204|301|302)
+            return 0
+            ;;
+        *)
+            log_msg "WARN" "Health check failed: HTTP ${http_code} from ${urltest_url}"
+            return 1
+            ;;
+    esac
+}
+
+# Проверяет, запущен ли sing-box
+is_singbox_alive() {
+    local pid_file="${RUN_DIR}/singbox.pid"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Перезапуск sing-box (sing-box сам переключится на след. сервер через urltest)
+restart_singbox() {
+    log_msg "INFO" "Restarting sing-box for server failover..."
+
+    local singbox_config
+    singbox_config=$(get_config singbox_config "/var/run/vlessmanager/singbox.json")
+    local pid_file="${RUN_DIR}/singbox.pid"
+
+    # Останавливаем
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null)
+        kill "$pid" 2>/dev/null
+        sleep 2
+        kill -9 "$pid" 2>/dev/null
+        rm -f "$pid_file"
+    fi
+    killall -q sing-box 2>/dev/null
+    sleep 1
+
+    # Запускаем
+    if [ -f "$singbox_config" ]; then
+        sing-box run -c "$singbox_config" &
+        local new_pid=$!
+        echo "$new_pid" > "$pid_file"
+        sleep 3
+
+        if kill -0 "$new_pid" 2>/dev/null; then
+            log_msg "INFO" "Sing-box restarted with PID ${new_pid}"
+            return 0
+        else
+            log_msg "ERROR" "Sing-box failed to restart"
+            rm -f "$pid_file"
+            return 1
+        fi
+    else
+        log_msg "ERROR" "Sing-box config not found: ${singbox_config}"
+        return 1
+    fi
+}
+
+# Полное обновление подписки + перезапуск
+force_full_update() {
+    log_msg "INFO" "Forcing full subscription update..."
+    /usr/bin/vlessmanager update
+}
+
+# ==================== ОСНОВНОЙ ЦИКЛ ====================
+
+run_healthcheck_loop() {
+    local interval_min
+    interval_min=$(get_config healthcheck_interval "5")
+    local max_fails
+    max_fails=$(get_config healthcheck_max_fails "2")
+    local auto_refresh
+    auto_refresh=$(get_config auto_refresh_on_fail "1")
+    local max_refresh
+    max_refresh=$(get_config max_refresh_attempts "3")
+
+    local interval_sec=$((interval_min * 60))
+    local refresh_count=0
+
+    log_msg "INFO" "Health check loop started: interval=${interval_min}min, max_fails=${max_fails}"
+
+    # Записываем PID
+    echo $$ > "$HEALTHCHECK_PID"
+
+    # Сбрасываем счётчик
+    set_fail_count 0
+
+    while true; do
+        # Проверяем, включен ли сервис
+        local enabled
+        enabled=$(get_config enabled "0")
+        if [ "$enabled" != "1" ]; then
+            log_msg "INFO" "Service disabled, stopping health check"
+            break
+        fi
+
+        # Перечитываем конфиг на лету
+        interval_min=$(get_config healthcheck_interval "5")
+        max_fails=$(get_config healthcheck_max_fails "2")
+        auto_refresh=$(get_config auto_refresh_on_fail "1")
+        max_refresh=$(get_config max_refresh_attempts "3")
+        interval_sec=$((interval_min * 60))
+
+        # Проверяем, жив ли sing-box
+        if ! is_singbox_alive; then
+            local auto_restart
+            auto_restart=$(get_config auto_restart "1")
+            if [ "$auto_restart" = "1" ]; then
+                log_msg "WARN" "Sing-box is not running, restarting..."
+                restart_singbox
+                sleep 5
+            fi
+            sleep "$interval_sec"
+            continue
+        fi
+
+        # Делаем проверку
+        if check_connectivity; then
+            # Успех — сбрасываем счётчики
+            local prev_fails
+            prev_fails=$(get_fail_count)
+            if [ "$prev_fails" -gt 0 ]; then
+                log_msg "INFO" "Connectivity restored after ${prev_fails} failures"
+            fi
+            set_fail_count 0
+            refresh_count=0
+            update_status_field "Running, healthy"
+        else
+            # Неудача — увеличиваем счётчик
+            local fails
+            fails=$(get_fail_count)
+            fails=$((fails + 1))
+            set_fail_count "$fails"
+
+            log_msg "WARN" "Health check failed (${fails}/${max_fails})"
+            update_status_field "Health check failed (${fails}/${max_fails})"
+
+            if [ "$fails" -ge "$max_fails" ]; then
+                log_msg "ERROR" "Max failures reached, initiating failover..."
+                set_fail_count 0
+
+                # Шаг 1: перезапускаем sing-box
+                # sing-box urltest автоматически выберет другой сервер
+                if restart_singbox; then
+                    sleep 5
+                    # Проверяем новый сервер
+                    if check_connectivity; then
+                        log_msg "INFO" "Failover successful after sing-box restart"
+                        refresh_count=0
+                        update_status_field "Running, failover OK"
+                        sleep "$interval_sec"
+                        continue
+                    fi
+                fi
+
+                # Шаг 2: обновляем подписку если включено
+                if [ "$auto_refresh" = "1" ]; then
+                    if [ "$refresh_count" -lt "$max_refresh" ]; then
+                        refresh_count=$((refresh_count + 1))
+                        log_msg "WARN" "Refreshing subscription (attempt ${refresh_count}/${max_refresh})"
+                        update_status_field "Refreshing subscription (${refresh_count}/${max_refresh})"
+
+                        force_full_update
+                        sleep 10
+
+                        if check_connectivity; then
+                            log_msg "INFO" "Connectivity restored after subscription refresh"
+                            refresh_count=0
+                            update_status_field "Running, refreshed"
+                            sleep "$interval_sec"
+                            continue
+                        fi
+                    else
+                        log_msg "ERROR" "All refresh attempts exhausted (${max_refresh})"
+                        update_status_field "ERROR: all refresh attempts failed"
+                        # Ждём одного полного интервала обновления подписки
+                        # прежде чем пытаться снова
+                        local update_int
+                        update_int=$(get_config update_interval "60")
+                        refresh_count=0
+                        sleep $((update_int * 60))
+                        continue
+                    fi
+                fi
+            fi
+        fi
+
+        sleep "$interval_sec"
+    done
+
+    rm -f "$HEALTHCHECK_PID"
+    log_msg "INFO" "Health check loop stopped"
+}
+
+# ==================== УПРАВЛЕНИЕ ====================
+
+stop_healthcheck() {
+    if [ -f "$HEALTHCHECK_PID" ]; then
+        local pid
+        pid=$(cat "$HEALTHCHECK_PID" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            sleep 1
+            kill -9 "$pid" 2>/dev/null
+        fi
+        rm -f "$HEALTHCHECK_PID"
+    fi
+    rm -f "$FAIL_COUNT_FILE"
+}
+
+case "$1" in
+    start)
+        stop_healthcheck
+        run_healthcheck_loop &
+        ;;
+    stop)
+        stop_healthcheck
+        ;;
+    restart)
+        stop_healthcheck
+        sleep 1
+        run_healthcheck_loop &
+        ;;
+    check)
+        # Одноразовая проверка
+        if check_connectivity; then
+            echo '{"healthy":true,"fail_count":0}'
+        else
+            local fc
+            fc=$(get_fail_count)
+            echo "{\"healthy\":false,\"fail_count\":${fc}}"
+        fi
+        ;;
+    status)
+        if [ -f "$HEALTHCHECK_PID" ]; then
+            local pid
+            pid=$(cat "$HEALTHCHECK_PID" 2>/dev/null)
+            if kill -0 "$pid" 2>/dev/null; then
+                local fc
+                fc=$(get_fail_count)
+                echo "{\"running\":true,\"pid\":${pid},\"fail_count\":${fc}}"
+            else
+                echo '{"running":false}'
+            fi
+        else
+            echo '{"running":false}'
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|check|status}"
+        ;;
+esac
