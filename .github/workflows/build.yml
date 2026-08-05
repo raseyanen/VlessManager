@@ -21,10 +21,10 @@ jobs:
         include:
           - name: openwrt-24.10.0
             sdk_page: https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/
-            cache_key: sdk-24.10.0
+            cache_key: sdk-24.10.0-v5
           - name: openwrt-snapshot
             sdk_page: https://downloads.openwrt.org/snapshots/targets/x86/64/
-            cache_key: sdk-snapshot
+            cache_key: sdk-snapshot-v5
 
     steps:
       - name: Checkout
@@ -44,7 +44,7 @@ jobs:
         id: cache-sdk
         with:
           path: sdk
-          key: ${{ matrix.cache_key }}-v3
+          key: ${{ matrix.cache_key }}
 
       - name: Download OpenWrt SDK
         if: steps.cache-sdk.outputs.cache-hit != 'true'
@@ -52,101 +52,91 @@ jobs:
           set -eux
 
           SDK_PAGE="${{ matrix.sdk_page }}"
-          echo "SDK page: ${SDK_PAGE}"
+          HTML="$(curl -fsSL "$SDK_PAGE")"
 
-          PAGE_HTML="$(curl -fsSL "${SDK_PAGE}")"
+          SDK_FILE="$(printf '%s' "$HTML" | grep -Eo 'openwrt-sdk-[^"]+\.(tar\.zst|tar\.xz|tar\.gz)' | head -n1)"
+          test -n "$SDK_FILE"
 
-          SDK_FILE="$(printf '%s' "${PAGE_HTML}" \
-            | grep -Eo 'openwrt-sdk-[^"<>]+\.(tar\.zst|tar\.xz)' \
-            | head -n1)"
-
-          if [ -z "${SDK_FILE}" ]; then
-            echo "ERROR: Cannot find SDK file on page"
-            printf '%s' "${PAGE_HTML}" | head -100
-            exit 1
-          fi
-
-          echo "Downloading: ${SDK_FILE}"
           wget -q "${SDK_PAGE}${SDK_FILE}" -O sdk-archive
 
           mkdir -p sdk
-          case "${SDK_FILE}" in
+          case "$SDK_FILE" in
             *.tar.zst) zstd -d sdk-archive --stdout | tar -x -C sdk --strip-components=1 ;;
             *.tar.xz)  tar -xJf sdk-archive -C sdk --strip-components=1 ;;
+            *.tar.gz)  tar -xzf sdk-archive -C sdk --strip-components=1 ;;
+            *) echo "Unsupported SDK archive: $SDK_FILE"; exit 1 ;;
           esac
 
           rm -f sdk-archive
 
-      - name: Prepare custom feed with our package
+      - name: Prepare custom feed
         run: |
           set -eux
 
-          # Создаём директорию для нашего feed
+          rm -rf custom-feed
           mkdir -p custom-feed/${PKG_NAME}
+          rsync -a --delete luci-app-vlessmanager/ custom-feed/${PKG_NAME}/
 
-          # Копируем содержимое пакета
-          cp -r luci-app-vlessmanager/* custom-feed/${PKG_NAME}/
+          # Чистим следы старых feed установок внутри sdk
+          rm -rf sdk/feeds/custom
+          rm -rf sdk/package/feeds/custom
 
-          # Регистрируем наш feed в SDK
-          # ВАЖНО: наш feed должен быть ПЕРЕД остальными
+          # Удаляем старые строки custom feed если были
+          sed -i '/^src-link custom /d' sdk/feeds.conf.default
+
           FEED_DIR="$(cd custom-feed && pwd)"
-
-          # Добавляем наш feed
           echo "src-link custom ${FEED_DIR}" >> sdk/feeds.conf.default
 
           echo "=== feeds.conf.default ==="
           cat sdk/feeds.conf.default
 
-      - name: Update and install feeds
+      - name: Update only needed feeds
         run: |
           set -eux
           cd sdk
 
-          # Обновляем все feeds
-          ./scripts/feeds update -a
+          ./scripts/feeds update packages
+          ./scripts/feeds update luci
+          ./scripts/feeds update custom
 
-          # Устанавливаем зависимости из стандартных feeds
-          ./scripts/feeds install -a -p luci
-          ./scripts/feeds install -a -p packages
-
-          # Устанавливаем наш пакет из custom feed
-          ./scripts/feeds install ${PKG_NAME}
-
-          # Проверяем что пакет виден
-          echo "=== Checking package visibility ==="
-          ls -la feeds/custom/${PKG_NAME}/ || echo "Not in feeds/custom"
-          ls -la package/feeds/custom/${PKG_NAME}/ || echo "Not in package/feeds"
-
-      - name: Configure and build
+      - name: Install only required packages
         run: |
           set -eux
           cd sdk
 
-          # Генерируем .config
-          make defconfig 2>&1 | tail -5
+          ./scripts/feeds install -p packages curl sing-box
+          ./scripts/feeds install -p luci luci-base
+          ./scripts/feeds install -p custom ${PKG_NAME}
 
-          # Включаем наш пакет
+          echo "=== Check installed package ==="
+          ls -la package/feeds/custom/${PKG_NAME}
+          test -f package/feeds/custom/${PKG_NAME}/Makefile
+
+      - name: Configure build
+        run: |
+          set -eux
+          cd sdk
+
+          rm -f .config
+          touch .config
+          echo "CONFIG_ALL_NONSHARED=y" >> .config
           echo "CONFIG_PACKAGE_${PKG_NAME}=m" >> .config
-          make defconfig 2>&1 | tail -5
 
-          # Собираем
-          make package/${PKG_NAME}/compile V=s -j"$(nproc)" 2>&1 || \
-          make package/${PKG_NAME}/compile V=s -j1 2>&1
+          make defconfig
 
-      - name: Collect built packages
+      - name: Build package
+        run: |
+          set -eux
+          cd sdk
+
+          make package/feeds/custom/${PKG_NAME}/compile V=s -j"$(nproc)" || \
+          make package/feeds/custom/${PKG_NAME}/compile V=s -j1
+
+      - name: Collect artifacts
         run: |
           set -eux
           mkdir -p artifacts
-
-          echo "=== Searching for built packages ==="
-          find sdk/bin/ -type f \( -name "*.apk" -o -name "*.ipk" \) | sort
-
-          find sdk/bin/ -type f \( \
-            -name "${PKG_NAME}*.apk" -o \
-            -name "${PKG_NAME}*.ipk" \
-          \) -exec cp {} artifacts/ \;
-
-          echo "=== Artifacts ==="
+          find sdk/bin/ -type f \( -name "${PKG_NAME}*.apk" -o -name "${PKG_NAME}*.ipk" \) -exec cp {} artifacts/ \;
           ls -la artifacts/
 
       - name: Upload artifacts
