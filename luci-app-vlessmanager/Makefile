@@ -4,6 +4,7 @@ PKG_NAME:=luci-app-vlessmanager
 PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
+PKG_MAINTAINER:=raseyanen
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -17,12 +18,25 @@ endef
 
 define Package/luci-app-vlessmanager/description
   VLESS proxy manager with LuCI UI, subscription updates,
-  urltest failover and TUN interface.
-  Runtime requirements: curl, sing-box, LuCI.
+  urltest failover and TUN interface for podkop.
+  Runtime requirements: curl, sing-box, luci-base.
 endef
 
 define Package/luci-app-vlessmanager/conffiles
 /etc/config/vlessmanager
+endef
+
+# ============================================
+# ВАЖНО: пакет без исходников — отключаем сборку
+# ============================================
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+endef
+
+define Build/Configure
+endef
+
+define Build/Compile
 endef
 
 define Package/luci-app-vlessmanager/install
@@ -40,10 +54,12 @@ define Package/luci-app-vlessmanager/install
 	$(INSTALL_BIN) ./root/usr/bin/vlessmanager-urltest $(1)/usr/bin/vlessmanager-urltest
 
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
-	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-vlessmanager.json $(1)/usr/share/luci/menu.d/
+	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-vlessmanager.json \
+		$(1)/usr/share/luci/menu.d/luci-app-vlessmanager.json
 
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
-	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-vlessmanager.json $(1)/usr/share/rpcd/acl.d/
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-vlessmanager.json \
+		$(1)/usr/share/rpcd/acl.d/luci-app-vlessmanager.json
 
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/vlessmanager
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/vlessmanager/settings.js \
@@ -55,18 +71,31 @@ define Package/luci-app-vlessmanager/postinst
 [ -n "$${IPKG_INSTROOT}" ] || {
 	echo "VlessManager installed."
 
-	if ! command -v curl >/dev/null 2>&1; then
-		echo "WARNING: curl not found. Install it manually: apk add curl"
+	MISSING=""
+	command -v curl     >/dev/null 2>&1 || MISSING="$$MISSING curl"
+	command -v sing-box >/dev/null 2>&1 || MISSING="$$MISSING sing-box"
+
+	if [ -n "$$MISSING" ]; then
+		echo "WARNING: missing runtime dependencies:$$MISSING"
+		echo "Install them with: apk add$$MISSING"
+		echo "            or:    opkg install$$MISSING"
 	fi
 
-	if ! command -v sing-box >/dev/null 2>&1; then
-		echo "WARNING: sing-box not found. Install it manually: apk add sing-box"
-	fi
+	[ -x /etc/uci-defaults/99-vlessmanager ] && {
+		(. /etc/uci-defaults/99-vlessmanager) && rm -f /etc/uci-defaults/99-vlessmanager
+	}
 
-	if [ ! -d /www/luci-static/resources ] && [ ! -d /www/luci-static ]; then
-		echo "WARNING: LuCI not found. Install LuCI first."
-	fi
+	/etc/init.d/rpcd restart 2>/dev/null
+	exit 0
+}
+endef
 
+define Package/luci-app-vlessmanager/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	/usr/bin/vlessmanager stop 2>/dev/null
+	/etc/init.d/vlessmanager disable 2>/dev/null
+	crontab -l 2>/dev/null | grep -v vlessmanager | crontab - 2>/dev/null
 	exit 0
 }
 endef
