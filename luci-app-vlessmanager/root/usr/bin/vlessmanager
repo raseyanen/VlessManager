@@ -720,6 +720,12 @@ main() {
     ensure_dirs
 
     case "$1" in
+        start|restart|update|cron_update)
+            check_runtime_deps || return 1
+            ;;
+    esac
+
+    case "$1" in
         start)
             [ "$(get_config enabled 0)" != "1" ] && { echo "Disabled"; return 0; }
             acquire_lock || return 1
