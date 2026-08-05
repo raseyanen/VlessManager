@@ -1,9 +1,8 @@
 #!/bin/sh
-# root/etc/uci-defaults/99-vlessmanager
+# luci-app-vlessmanager/root/etc/uci-defaults/99-vlessmanager
 
-# Убедимся что конфиг существует
-if [ ! -f /etc/config/vlessmanager ]; then
-    touch /etc/config/vlessmanager
+if [ ! -f /etc/config/vlessmanager ] || ! uci -q get vlessmanager.main >/dev/null 2>&1; then
+    [ ! -f /etc/config/vlessmanager ] && touch /etc/config/vlessmanager
     uci set vlessmanager.main=vlessmanager
     uci set vlessmanager.main.enabled=0
     uci set vlessmanager.main.subscribe_url=''
@@ -14,6 +13,8 @@ if [ ! -f /etc/config/vlessmanager ]; then
     uci set vlessmanager.main.urltest_interval=300
     uci set vlessmanager.main.urltest_tolerance=50
     uci set vlessmanager.main.urltest_timeout=5000
+    uci set vlessmanager.main.healthcheck_interval=5
+    uci set vlessmanager.main.healthcheck_max_fails=2
     uci set vlessmanager.main.interface_name='vlessmanager'
     uci set vlessmanager.main.tun_address='172.19.0.1/30'
     uci set vlessmanager.main.tun_address6='fdfe:dcba:9876::1/126'
@@ -31,8 +32,8 @@ if [ ! -f /etc/config/vlessmanager ]; then
     uci commit vlessmanager
 fi
 
-# Разрешаем выполнение
-chmod +x /usr/bin/vlessmanager
-chmod +x /etc/init.d/vlessmanager
+chmod +x /usr/bin/vlessmanager 2>/dev/null
+chmod +x /usr/bin/vlessmanager-urltest 2>/dev/null
+chmod +x /etc/init.d/vlessmanager 2>/dev/null
 
 exit 0
