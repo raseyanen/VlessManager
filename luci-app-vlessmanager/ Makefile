@@ -9,6 +9,7 @@ PKG_MAINTAINER:=VlessManager
 
 LUCI_TITLE:=LuCI VlessManager - VLESS Proxy Manager
 LUCI_DEPENDS:=+sing-box +curl +jq +coreutils-base64
+LUCI_PKGARCH:=all
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
