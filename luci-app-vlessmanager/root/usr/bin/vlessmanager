@@ -11,6 +11,32 @@ PID_FILE="/var/run/${PROG_NAME}/singbox.pid"
 RUN_DIR="/var/run/${PROG_NAME}"
 STATUS_FILE="${RUN_DIR}/status.json"
 
+# ===================== ПРОВЕРКА ЗАВИСИМОСТЕЙ =====================
+
+require_bin() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "ERROR: required binary not found: $1" >&2
+        log_error "Missing required binary: $1"
+        return 1
+    fi
+    return 0
+}
+
+check_runtime_deps() {
+    local ok=0
+    require_bin curl     || ok=1
+    require_bin sing-box || ok=1
+    if [ "$ok" -ne 0 ]; then
+        echo "" >&2
+        echo "Install missing packages:" >&2
+        echo "  apk add curl sing-box" >&2
+        echo "  or" >&2
+        echo "  opkg install curl sing-box" >&2
+        return 1
+    fi
+    return 0
+}
+
 # ===================== УТИЛИТЫ =====================
 
 log() {
