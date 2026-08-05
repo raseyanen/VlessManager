@@ -118,3 +118,5 @@ jobs:
           name: ${{ env.PKG_NAME }}-${{ matrix.name }}
           path: artifacts/
           retention-days: 90
+      - name: Download a Build Artifact
+        uses: actions/download-artifact@v8.0.1
