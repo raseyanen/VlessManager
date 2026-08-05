@@ -1,0 +1,43 @@
+# Makefile
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=luci-app-vlessmanager
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
+PKG_LICENSE:=MIT
+PKG_MAINTAINER:=VlessManager
+
+LUCI_TITLE:=LuCI VlessManager - VLESS Proxy Manager
+LUCI_DEPENDS:=+sing-box +curl +jq +coreutils-base64
+
+include $(TOPDIR)/feeds/luci/luci.mk
+
+define Package/$(PKG_NAME)/conffiles
+/etc/config/vlessmanager
+endef
+
+define Package/$(PKG_NAME)/install
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./root/etc/config/vlessmanager $(1)/etc/config/vlessmanager
+
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./root/etc/init.d/vlessmanager $(1)/etc/init.d/vlessmanager
+
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./root/etc/uci-defaults/99-vlessmanager $(1)/etc/uci-defaults/99-vlessmanager
+
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) ./root/usr/bin/vlessmanager $(1)/usr/bin/vlessmanager
+
+	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
+	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-vlessmanager.json $(1)/usr/share/luci/menu.d/
+
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-vlessmanager.json $(1)/usr/share/rpcd/acl.d/
+
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/vlessmanager
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/vlessmanager/settings.js \
+		$(1)/www/luci-static/resources/view/vlessmanager/settings.js
+endef
+
+$(eval $(call BuildPackage,$(PKG_NAME)))
