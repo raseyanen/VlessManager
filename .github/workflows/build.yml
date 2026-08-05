@@ -99,15 +99,13 @@ jobs:
           set -eux
           cd sdk
           ./scripts/feeds update packages
-          ./scripts/feeds update luci
 
       - name: Install dependency metadata
         run: |
           set -eux
           cd sdk
-          ./scripts/feeds install -p packages curl sing-box || true
-          ./scripts/feeds install -p luci luci-base rpcd luci-compat || true
-
+          ./scripts/feeds install -p packages curl || true
+          
       - name: Configure build
         run: |
           set -eux
