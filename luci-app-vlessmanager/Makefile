@@ -12,8 +12,7 @@ define Package/luci-app-vlessmanager
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=VlessManager - VLESS Proxy Manager
-  DEPENDS:=+curl +luci-base
-  EXTRA_DEPENDS:=sing-box
+  DEPENDS:=+curl
   PKGARCH:=all
 endef
 
@@ -49,6 +48,19 @@ define Package/luci-app-vlessmanager/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/vlessmanager
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/vlessmanager/settings.js \
 		$(1)/www/luci-static/resources/view/vlessmanager/settings.js
+endef
+
+define Package/luci-app-vlessmanager/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	if ! command -v sing-box >/dev/null 2>&1; then
+		echo "WARNING: sing-box not found. Install it manually: apk add sing-box"
+	fi
+	if [ ! -d /www/luci-static/resources ]; then
+		echo "WARNING: LuCI not found. Install LuCI first."
+	fi
+	exit 0
+}
 endef
 
 $(eval $(call BuildPackage,luci-app-vlessmanager))
