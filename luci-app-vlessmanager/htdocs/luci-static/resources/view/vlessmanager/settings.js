@@ -1,4 +1,4 @@
-// htdocs/luci-static/resources/view/vlessmanager/settings.js
+// luci-app-vlessmanager/htdocs/luci-static/resources/view/vlessmanager/settings.js
 
 'use strict';
 'require view';
@@ -8,13 +8,6 @@
 'require rpc';
 'require poll';
 'require fs';
-
-var callGetStatus = rpc.declare({
-    object: 'file',
-    method: 'exec',
-    params: ['command', 'params'],
-    expect: { stdout: '' }
-});
 
 return view.extend({
     load: function () {
@@ -29,13 +22,9 @@ return view.extend({
     getStatus: function () {
         return fs.exec('/usr/bin/vlessmanager', ['status'])
             .then(function (res) {
-                try {
-                    return JSON.parse(res.stdout.trim());
-                } catch (e) {
-                    return { status: 'unknown', message: 'Cannot parse status' };
-                }
-            })
-            .catch(function () {
+                try { return JSON.parse(res.stdout.trim()); }
+                catch (e) { return { status: 'unknown', message: 'Parse error' }; }
+            }).catch(function () {
                 return { status: 'unknown', message: 'Cannot get status' };
             });
     },
@@ -43,13 +32,9 @@ return view.extend({
     getServers: function () {
         return fs.exec('/usr/bin/vlessmanager', ['servers'])
             .then(function (res) {
-                try {
-                    return JSON.parse(res.stdout.trim());
-                } catch (e) {
-                    return { servers: [], count: 0 };
-                }
-            })
-            .catch(function () {
+                try { return JSON.parse(res.stdout.trim()); }
+                catch (e) { return { servers: [], count: 0 }; }
+            }).catch(function () {
                 return { servers: [], count: 0 };
             });
     },
@@ -57,38 +42,26 @@ return view.extend({
     getLog: function () {
         return fs.exec('/usr/bin/vlessmanager', ['log', '100'])
             .then(function (res) {
-                try {
-                    var data = JSON.parse(res.stdout.trim());
-                    return data.log || '';
-                } catch (e) {
-                    return '';
-                }
-            })
-            .catch(function () {
-                return '';
-            });
+                try { return JSON.parse(res.stdout.trim()).log || ''; }
+                catch (e) { return ''; }
+            }).catch(function () { return ''; });
     },
 
     handleAction: function (action) {
-        var self = this;
-
         ui.showModal(_('VlessManager'), [
             E('p', { class: 'spinning' }, _('Executing: %s...').format(action))
         ]);
 
         return fs.exec('/usr/bin/vlessmanager', [action])
             .then(function () {
-                return new Promise(function (resolve) {
-                    setTimeout(resolve, 3000);
-                });
-            })
-            .then(function () {
+                return new Promise(function (r) { setTimeout(r, 3000); });
+            }).then(function () {
                 ui.hideModal();
                 window.location.reload();
-            })
-            .catch(function (err) {
+            }).catch(function (err) {
                 ui.hideModal();
-                ui.addNotification(null, E('p', _('Error executing %s: %s').format(action, err.message)), 'error');
+                ui.addNotification(null,
+                    E('p', _('Error: %s').format(err.message)), 'error');
             });
     },
 
@@ -101,283 +74,271 @@ return view.extend({
         var m, s, o;
 
         m = new form.Map('vlessmanager', _('VlessManager'),
-            _('VLESS proxy manager with automatic subscription updates and URL testing. Creates a TUN VPN interface compatible with podkop.'));
+            _('VLESS proxy manager with subscription updates, active health checking, automatic server failover, and TUN interface for podkop.'));
 
-        // ==================== STATUS SECTION ====================
-
+        // ==================== STATUS ====================
         s = m.section(form.NamedSection, 'main', 'vlessmanager', _('Status & Control'));
         s.anonymous = true;
 
-        // Status display
         o = s.option(form.DummyValue, '_status', _('Service Status'));
         o.rawhtml = true;
         o.cfgvalue = function () {
-            var statusClass = 'label';
-            var statusText = status.status || 'unknown';
-            var statusMsg = status.message || '';
-
+            var sc = 'label notice', st = (status.status || 'unknown').toUpperCase();
             switch (status.status) {
-                case 'running':
-                    statusClass = 'label success';
-                    break;
-                case 'stopped':
-                    statusClass = 'label warning';
-                    break;
-                case 'error':
-                    statusClass = 'label danger';
-                    break;
-                default:
-                    statusClass = 'label notice';
+                case 'running': sc = 'label success'; break;
+                case 'stopped': sc = 'label warning'; break;
+                case 'error':   sc = 'label danger';  break;
             }
 
-            var html = '<div style="display:flex;align-items:center;gap:15px;flex-wrap:wrap;">';
-            html += '<span class="' + statusClass + '" style="padding:5px 12px;border-radius:4px;font-weight:bold;">' + statusText.toUpperCase() + '</span>';
-            if (statusMsg) {
-                html += '<span style="color:#666;">' + statusMsg + '</span>';
+            var html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">';
+            html += '<span class="' + sc + '" style="padding:5px 12px;border-radius:4px;font-weight:bold;">' + st + '</span>';
+            if (status.message) html += '<span style="color:#555;">' + status.message + '</span>';
+            if (status.server_count > 0) html += '<span class="label" style="padding:3px 8px;">Servers: ' + status.server_count + '</span>';
+
+            // Healthcheck status
+            if (status.healthcheck) {
+                var hc = status.healthcheck;
+                if (hc.running) {
+                    var hcLabel = hc.fail_count > 0
+                        ? '<span class="label warning" style="padding:3px 8px;">HC: ' + hc.fail_count + ' fails</span>'
+                        : '<span class="label success" style="padding:3px 8px;">HC: OK</span>';
+                    html += hcLabel;
+                } else {
+                    html += '<span class="label notice" style="padding:3px 8px;">HC: stopped</span>';
+                }
             }
-            if (status.server_count > 0) {
-                html += '<span class="label" style="padding:3px 8px;">Servers: ' + status.server_count + '</span>';
-            }
-            if (status.last_update) {
-                html += '<span style="color:#888;font-size:0.9em;">Last update: ' + status.last_update + '</span>';
-            }
-            if (status.version) {
-                html += '<span style="color:#888;font-size:0.85em;">v' + status.version + '</span>';
-            }
+
+            if (status.last_update) html += '<span style="color:#888;font-size:0.9em;">Updated: ' + status.last_update + '</span>';
+            if (status.version) html += '<span style="color:#aaa;font-size:0.85em;">v' + status.version + '</span>';
             html += '</div>';
             return html;
         };
 
-        // Control buttons
         o = s.option(form.DummyValue, '_controls', _('Controls'));
         o.rawhtml = true;
         o.cfgvalue = function () {
-            return '<div style="display:flex;gap:10px;flex-wrap:wrap;">' +
-                '<button class="cbi-button cbi-button-apply" onclick="document.dispatchEvent(new CustomEvent(\'vlessmanager-action\', {detail:\'start\'}))">' + _('Start') + '</button>' +
-                '<button class="cbi-button cbi-button-reset" onclick="document.dispatchEvent(new CustomEvent(\'vlessmanager-action\', {detail:\'stop\'}))">' + _('Stop') + '</button>' +
-                '<button class="cbi-button cbi-button-action" onclick="document.dispatchEvent(new CustomEvent(\'vlessmanager-action\', {detail:\'restart\'}))">' + _('Restart') + '</button>' +
-                '<button class="cbi-button cbi-button-action" onclick="document.dispatchEvent(new CustomEvent(\'vlessmanager-action\', {detail:\'update\'}))">' + _('Force Update') + '</button>' +
+            return '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
+                '<button class="cbi-button cbi-button-apply" id="btn-start">' + _('Start') + '</button>' +
+                '<button class="cbi-button cbi-button-reset" id="btn-stop">' + _('Stop') + '</button>' +
+                '<button class="cbi-button cbi-button-action" id="btn-restart">' + _('Restart') + '</button>' +
+                '<button class="cbi-button cbi-button-action" id="btn-update">' + _('Force Update') + '</button>' +
+                '<button class="cbi-button" id="btn-healthcheck">' + _('Test Now') + '</button>' +
                 '</div>';
         };
 
-        // Event listener for buttons
-        document.addEventListener('vlessmanager-action', function (e) {
-            self.handleAction(e.detail);
-        });
-
-        // ==================== MAIN SETTINGS ====================
-
-        s = m.section(form.NamedSection, 'main', 'vlessmanager', _('General Settings'));
+        // ==================== TABS ====================
+        s = m.section(form.NamedSection, 'main', 'vlessmanager', _('Configuration'));
         s.anonymous = true;
         s.tab('general', _('General'));
         s.tab('filter', _('Filters'));
-        s.tab('urltest', _('URL Test'));
-        s.tab('network', _('Network & TUN'));
+        s.tab('urltest', _('URL Test & Health Check'));
+        s.tab('network', _('Network'));
         s.tab('advanced', _('Advanced'));
         s.tab('servers', _('Servers'));
         s.tab('log', _('Log'));
 
-        // --- General Tab ---
-
-        o = s.taboption('general', form.Flag, 'enabled', _('Enable'),
-            _('Enable or disable VlessManager service'));
+        // --- General ---
+        o = s.taboption('general', form.Flag, 'enabled', _('Enable'));
         o.rmempty = false;
-        o.default = '0';
 
         o = s.taboption('general', form.Value, 'subscribe_url', _('Subscription URL'),
-            _('URL to a raw text file with VLESS configs (one per line). Can be a GitHub raw URL.'));
+            _('Raw text URL with VLESS configs (one per line). Supports base64-encoded content.'));
         o.rmempty = false;
         o.placeholder = 'https://raw.githubusercontent.com/user/repo/main/configs.txt';
-        o.validate = function (section_id, value) {
-            if (!value || value === '') return _('Subscription URL is required');
-            if (!/^https?:\/\//.test(value)) return _('URL must start with http:// or https://');
+        o.validate = function (sid, v) {
+            if (!v) return _('Required');
+            if (!/^https?:\/\//.test(v)) return _('Must start with http(s)://');
             return true;
         };
 
-        o = s.taboption('general', form.Value, 'update_interval', _('Update Interval (minutes)'),
-            _('How often to refresh the subscription. Minimum: 5 minutes.'));
+        o = s.taboption('general', form.Value, 'update_interval', _('Update Interval (min)'),
+            _('Subscription refresh interval. Minimum 5 minutes.'));
         o.datatype = 'min(5)';
         o.default = '60';
-        o.placeholder = '60';
 
         o = s.taboption('general', form.ListValue, 'log_level', _('Log Level'));
-        o.value('trace', 'Trace');
-        o.value('debug', 'Debug');
-        o.value('info', 'Info');
-        o.value('warn', 'Warning');
-        o.value('error', 'Error');
-        o.value('fatal', 'Fatal');
+        o.value('trace'); o.value('debug'); o.value('info');
+        o.value('warn');  o.value('error'); o.value('fatal');
         o.default = 'warn';
 
-        // --- Filter Tab ---
-
+        // --- Filters ---
         o = s.taboption('filter', form.Value, 'include_regex', _('Include Regex'),
-            _('Only include configs whose name matches this regex. Leave empty to include all. Applied to the config name (part after #).'));
-        o.placeholder = '(US|DE|NL)';
-        o.rmempty = true;
+            _('Only include configs matching this regex (applied to name after #). Empty = all.'));
+        o.placeholder = '(US|DE|NL|🇺🇸|🇩🇪)';
 
         o = s.taboption('filter', form.Value, 'exclude_regex', _('Exclude Regex'),
-            _('Exclude configs whose name matches this regex. Leave empty to exclude nothing.'));
-        o.placeholder = '(expired|test)';
-        o.rmempty = true;
+            _('Exclude configs matching this regex.'));
+        o.placeholder = '(expired|test|🏴)';
 
-        o = s.taboption('filter', form.MultiValue, 'transport_filter', _('Transport Filter'),
-            _('Filter by transport type. Select "all" to allow all types.'));
+        o = s.taboption('filter', form.MultiValue, 'transport_filter', _('Transport Filter'));
         o.value('all', _('All'));
-        o.value('tcp', 'TCP');
-        o.value('ws', 'WebSocket');
-        o.value('xhttp', 'XHTTP/SplitHTTP');
-        o.value('grpc', 'gRPC');
-        o.value('http', 'HTTP/H2');
+        o.value('tcp', 'TCP'); o.value('ws', 'WebSocket');
+        o.value('xhttp', 'XHTTP'); o.value('grpc', 'gRPC'); o.value('http', 'HTTP/H2');
         o.default = 'all';
 
-        // --- URL Test Tab ---
-
+        // --- URL Test & Health Check ---
         o = s.taboption('urltest', form.Value, 'urltest_url', _('URL Test URL'),
-            _('URL used for testing server availability. Should return a quick response.'));
+            _('URL for both sing-box urltest and active health check.'));
         o.default = 'https://www.gstatic.com/generate_204';
-        o.placeholder = 'https://www.gstatic.com/generate_204';
 
-        o = s.taboption('urltest', form.Value, 'urltest_interval', _('Test Interval (seconds)'),
-            _('How often sing-box performs URL tests between servers.'));
+        o = s.taboption('urltest', form.Value, 'urltest_interval', _('Sing-box Test Interval (sec)'),
+            _('Internal sing-box urltest interval between outbound servers.'));
         o.datatype = 'min(30)';
         o.default = '300';
-        o.placeholder = '300';
 
-        o = s.taboption('urltest', form.Value, 'urltest_tolerance', _('Tolerance (ms)'),
-            _('Maximum allowed latency difference in milliseconds between servers.'));
+        o = s.taboption('urltest', form.Value, 'urltest_tolerance', _('Tolerance (ms)'));
         o.datatype = 'min(0)';
         o.default = '50';
-        o.placeholder = '50';
 
-        o = s.taboption('urltest', form.Value, 'urltest_timeout', _('Timeout (ms)'),
-            _('Timeout for URL test in milliseconds.'));
+        o = s.taboption('urltest', form.Value, 'urltest_timeout', _('Timeout (ms)'));
         o.datatype = 'min(1000)';
         o.default = '5000';
-        o.placeholder = '5000';
+
+        o = s.taboption('urltest', form.Value, 'healthcheck_interval', _('Health Check Interval (min)'),
+            _('How often the external health check daemon tests connectivity through the TUN. When check fails — sing-box is restarted to trigger server failover.'));
+        o.datatype = 'min(1)';
+        o.default = '5';
+
+        o = s.taboption('urltest', form.Value, 'healthcheck_max_fails', _('Max Consecutive Failures'),
+            _('Number of consecutive health check failures before triggering failover/restart.'));
+        o.datatype = 'range(1,10)';
+        o.default = '2';
 
         o = s.taboption('urltest', form.Flag, 'auto_refresh_on_fail', _('Auto Refresh on Failure'),
-            _('Automatically refresh subscription if no servers are available.'));
+            _('Re-download subscription if restart does not help.'));
         o.default = '1';
 
-        o = s.taboption('urltest', form.Value, 'max_refresh_attempts', _('Max Refresh Attempts'),
-            _('Maximum number of consecutive refresh attempts when no servers are available.'));
+        o = s.taboption('urltest', form.Value, 'max_refresh_attempts', _('Max Refresh Attempts'));
         o.datatype = 'range(1,10)';
         o.default = '3';
 
         o = s.taboption('urltest', form.Flag, 'auto_restart', _('Auto Restart'),
-            _('Automatically restart sing-box if it crashes.'));
+            _('Restart sing-box if it crashes.'));
         o.default = '1';
 
-        // --- Network Tab ---
-
+        // --- Network ---
         o = s.taboption('network', form.Value, 'interface_name', _('Interface Name'),
-            _('Name of the TUN network interface. Used for integration with podkop and routing.'));
+            _('TUN interface name. Visible in Network → Interfaces for use with podkop.'));
         o.default = 'vlessmanager';
-        o.placeholder = 'vlessmanager';
-        o.validate = function (section_id, value) {
-            if (!/^[a-zA-Z][a-zA-Z0-9_]{0,14}$/.test(value))
-                return _('Interface name must be 1-15 alphanumeric characters, starting with a letter');
-            return true;
+        o.validate = function (sid, v) {
+            return /^[a-zA-Z][a-zA-Z0-9_]{0,14}$/.test(v) ? true : _('1-15 alphanumeric, starting with letter');
         };
 
-        o = s.taboption('network', form.Value, 'tun_address', _('TUN IPv4 Address'),
-            _('IPv4 address for the TUN interface in CIDR format.'));
-        o.default = '172.19.0.1/30';
-        o.placeholder = '172.19.0.1/30';
-        o.datatype = 'cidr4';
+        o = s.taboption('network', form.Value, 'tun_address', _('TUN IPv4'));
+        o.default = '172.19.0.1/30'; o.datatype = 'cidr4';
 
-        o = s.taboption('network', form.Value, 'tun_address6', _('TUN IPv6 Address'),
-            _('IPv6 address for the TUN interface in CIDR format.'));
-        o.default = 'fdfe:dcba:9876::1/126';
-        o.placeholder = 'fdfe:dcba:9876::1/126';
-        o.datatype = 'cidr6';
+        o = s.taboption('network', form.Value, 'tun_address6', _('TUN IPv6'));
+        o.default = 'fdfe:dcba:9876::1/126'; o.datatype = 'cidr6';
 
         o = s.taboption('network', form.Value, 'tun_mtu', _('MTU'));
-        o.datatype = 'range(1280,9000)';
-        o.default = '9000';
+        o.datatype = 'range(1280,9000)'; o.default = '9000';
 
         o = s.taboption('network', form.ListValue, 'tun_stack', _('TUN Stack'));
-        o.value('system', 'System');
-        o.value('gvisor', 'gVisor');
-        o.value('mixed', 'Mixed');
+        o.value('system'); o.value('gvisor'); o.value('mixed');
         o.default = 'mixed';
 
-        o = s.taboption('network', form.Value, 'dns_server', _('DNS Server'),
-            _('DNS server for DNS-over-HTTPS through the tunnel.'));
-        o.default = '1.1.1.1';
-        o.placeholder = '1.1.1.1';
-        o.datatype = 'ipaddr';
+        o = s.taboption('network', form.Value, 'dns_server', _('DNS Server'));
+        o.default = '1.1.1.1'; o.datatype = 'ipaddr';
 
-        // --- Advanced Tab ---
-
+        // --- Advanced ---
         o = s.taboption('advanced', form.Value, 'log_file', _('Log File'));
         o.default = '/var/log/vlessmanager.log';
-
-        o = s.taboption('advanced', form.Value, 'singbox_config', _('Sing-box Config Path'));
+        o = s.taboption('advanced', form.Value, 'singbox_config', _('Sing-box Config'));
         o.default = '/var/run/vlessmanager/singbox.json';
-
-        o = s.taboption('advanced', form.Value, 'cache_file', _('Cache File Path'));
+        o = s.taboption('advanced', form.Value, 'cache_file', _('Cache File'));
         o.default = '/var/run/vlessmanager/subscribe_cache.txt';
 
-        // --- Servers Tab ---
-
-        o = s.taboption('servers', form.DummyValue, '_servers_list', _('Current Servers'));
+        // --- Servers ---
+        o = s.taboption('servers', form.DummyValue, '_srvlist', _('Loaded Servers'));
         o.rawhtml = true;
         o.cfgvalue = function () {
-            if (!servers.servers || servers.servers.length === 0) {
-                return '<div style="padding:15px;text-align:center;color:#888;">' +
-                    '<em>' + _('No servers loaded. Click "Force Update" to fetch subscription.') + '</em></div>';
+            if (!servers.servers || !servers.servers.length) {
+                return '<div style="padding:20px;text-align:center;color:#888;">' +
+                    '<em>' + _('No servers. Press "Force Update".') + '</em></div>';
             }
-
-            var html = '<div style="margin:10px 0;">';
-            html += '<p><strong>' + _('Total servers: ') + servers.count + '</strong></p>';
-            html += '<div style="max-height:400px;overflow-y:auto;">';
-            html += '<table class="table" style="width:100%;">';
-            html += '<tr class="tr table-titles">';
-            html += '<th class="th">#</th>';
-            html += '<th class="th">' + _('Name') + '</th>';
-            html += '<th class="th">' + _('Host') + '</th>';
-            html += '<th class="th">' + _('Port') + '</th>';
-            html += '<th class="th">' + _('Transport') + '</th>';
-            html += '<th class="th">' + _('Security') + '</th>';
-            html += '</tr>';
-
+            var h = '<p><strong>Total: ' + servers.count + '</strong></p>' +
+                '<div style="max-height:400px;overflow-y:auto;">' +
+                '<table class="table" style="width:100%"><tr class="tr table-titles">' +
+                '<th class="th">#</th><th class="th">Name</th><th class="th">Host</th>' +
+                '<th class="th">Port</th><th class="th">Transport</th><th class="th">Security</th></tr>';
             for (var i = 0; i < servers.servers.length; i++) {
-                var srv = servers.servers[i];
-                html += '<tr class="tr">';
-                html += '<td class="td">' + (i + 1) + '</td>';
-                html += '<td class="td" style="word-break:break-all;">' + (srv.name || '-') + '</td>';
-                html += '<td class="td">' + (srv.host || '-') + '</td>';
-                html += '<td class="td">' + (srv.port || '-') + '</td>';
-                html += '<td class="td"><span class="label">' + (srv.transport || 'tcp') + '</span></td>';
-                html += '<td class="td"><span class="label">' + (srv.security || 'none') + '</span></td>';
-                html += '</tr>';
+                var sv = servers.servers[i];
+                h += '<tr class="tr"><td class="td">' + (i+1) + '</td>' +
+                    '<td class="td" style="word-break:break-all;">' + (sv.name||'-') + '</td>' +
+                    '<td class="td">' + (sv.host||'-') + '</td>' +
+                    '<td class="td">' + (sv.port||'-') + '</td>' +
+                    '<td class="td"><span class="label">' + (sv.transport||'tcp') + '</span></td>' +
+                    '<td class="td"><span class="label">' + (sv.security||'none') + '</span></td></tr>';
             }
-
-            html += '</table></div></div>';
-            return html;
+            h += '</table></div>';
+            return h;
         };
 
-        // --- Log Tab ---
-
-        o = s.taboption('log', form.DummyValue, '_log_content', _('Service Log'));
+        // --- Log ---
+        o = s.taboption('log', form.DummyValue, '_logview', _('Log'));
         o.rawhtml = true;
         o.cfgvalue = function () {
-            var logText = logContent || _('No log entries');
-            // Replace \n with actual newlines for display
-            logText = logText.replace(/\\n/g, '\n');
-
-            return '<div style="margin:10px 0;">' +
-                '<button class="cbi-button cbi-button-action" style="margin-bottom:10px;" ' +
-                'onclick="document.dispatchEvent(new CustomEvent(\'vlessmanager-action\', {detail:\'log\'}))">' +
-                _('Refresh Log') + '</button>' +
+            var t = (logContent || _('No log')).replace(/\\n/g, '\n');
+            return '<button class="cbi-button cbi-button-action" style="margin-bottom:10px;" ' +
+                'id="btn-refresh-log">' + _('Refresh') + '</button>' +
                 '<pre style="max-height:500px;overflow:auto;background:#1a1a2e;color:#e0e0e0;' +
-                'padding:15px;border-radius:6px;font-size:12px;line-height:1.5;white-space:pre-wrap;' +
-                'word-wrap:break-word;font-family:\'Courier New\',monospace;">' +
-                logText + '</pre></div>';
+                'padding:15px;border-radius:6px;font-size:12px;line-height:1.5;' +
+                'font-family:monospace;white-space:pre-wrap;">' + t + '</pre>';
         };
 
-        return m.render();
+        // Рендерим и привязываем кнопки
+        return m.render().then(function (node) {
+            // Привязка кнопок
+            var btnMap = {
+                'btn-start':     'start',
+                'btn-stop':      'stop',
+                'btn-restart':   'restart',
+                'btn-update':    'update',
+                'btn-healthcheck': 'healthcheck'
+            };
+
+            Object.keys(btnMap).forEach(function (id) {
+                var btn = node.querySelector('#' + id);
+                if (btn) {
+                    btn.addEventListener('click', function (ev) {
+                        ev.preventDefault();
+                        if (btnMap[id] === 'healthcheck') {
+                            // Одноразовая проверка
+                            fs.exec('/usr/bin/vlessmanager', ['healthcheck'])
+                                .then(function (res) {
+                                    try {
+                                        var r = JSON.parse(res.stdout.trim());
+                                        var msg = r.healthy
+                                            ? _('Health check PASSED')
+                                            : _('Health check FAILED (fail count: %d)').format(r.fail_count);
+                                        ui.addNotification(null, E('p', msg),
+                                            r.healthy ? 'info' : 'warning');
+                                    } catch (e) {
+                                        ui.addNotification(null, E('p', res.stdout), 'info');
+                                    }
+                                }).catch(function (err) {
+                                    ui.addNotification(null, E('p', err.message), 'error');
+                                });
+                        } else {
+                            self.handleAction(btnMap[id]);
+                        }
+                    });
+                }
+            });
+
+            // Кнопка обновления лога
+            var logBtn = node.querySelector('#btn-refresh-log');
+            if (logBtn) {
+                logBtn.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    self.getLog().then(function (log) {
+                        var pre = node.querySelector('pre');
+                        if (pre) pre.textContent = (log || _('No log')).replace(/\\n/g, '\n');
+                    });
+                });
+            }
+
+            return node;
+        });
     }
 });
