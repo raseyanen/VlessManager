@@ -1,0 +1,17 @@
+// root/usr/share/luci/menu.d/luci-app-vlessmanager.json
+{
+    "admin/vpn/vlessmanager": {
+        "title": "VlessManager",
+        "action": {
+            "type": "view",
+            "path": "vlessmanager/settings"
+        },
+        "depends": {
+            "acl": ["luci-app-vlessmanager"],
+            "uci": {
+                "vlessmanager": true
+            }
+        },
+        "order": 90
+    }
+}
